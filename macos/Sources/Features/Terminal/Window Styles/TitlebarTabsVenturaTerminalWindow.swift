@@ -460,26 +460,40 @@ class TitlebarTabsVenturaTerminalWindow: TerminalWindow {
     /// so that AppKit's internal NSTabBar layout completes first, then overrides
     /// the tab button frames to fill the available width.
     func expandTabWidths() {
+        // Double-deferred: first async lets AppKit's run loop finish,
+        // second async (after CA transaction) lets NSTabBar's layout complete.
         DispatchQueue.main.async { [weak self] in
-            guard let self else { return }
-            let buttons = self.tabButtonsInVisualOrder()
-            guard !buttons.isEmpty else { return }
-            guard let tabBar = self.tabBarView else { return }
-
-            // Available width = tab bar width minus new-tab button (~32px)
-            let newTabButtonWidth: CGFloat = 32
-            let availableWidth = tabBar.bounds.width - newTabButtonWidth
-            guard availableWidth > 0 else { return }
-
-            let tabWidth = floor(availableWidth / CGFloat(buttons.count))
-
-            for (i, button) in buttons.enumerated() {
-                var frame = button.frame
-                frame.origin.x = CGFloat(i) * tabWidth
-                frame.size.width = tabWidth
-                button.frame = frame
+            CATransaction.setCompletionBlock { [weak self] in
+                guard let self else { return }
+                self.applyExpandedTabFrames()
             }
+            // Trigger a CA transaction so the completion block fires
+            CATransaction.begin()
+            CATransaction.commit()
         }
+    }
+
+    private func applyExpandedTabFrames() {
+        let buttons = tabButtonsInVisualOrder()
+        guard !buttons.isEmpty else { return }
+        guard let tabBar = tabBarView else { return }
+
+        // Available width = tab bar width minus new-tab button (~32px)
+        let newTabButtonWidth: CGFloat = 32
+        let availableWidth = tabBar.bounds.width - newTabButtonWidth
+        guard availableWidth > 0 else { return }
+
+        let tabWidth = floor(availableWidth / CGFloat(buttons.count))
+
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        for (i, button) in buttons.enumerated() {
+            var frame = button.frame
+            frame.origin.x = CGFloat(i) * tabWidth
+            frame.size.width = tabWidth
+            button.frame = frame
+        }
+        CATransaction.commit()
     }
 
     private func addWindowButtonsBackdrop(titlebarView: NSView, toolbarView: NSView) {

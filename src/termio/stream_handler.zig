@@ -11,6 +11,7 @@ const renderer = @import("../renderer.zig");
 const termio = @import("../termio.zig");
 const terminal = @import("../terminal/main.zig");
 const terminfo = @import("../terminfo/main.zig");
+const systivate_telemetry = @import("../systivate_telemetry.zig");
 const posix = std.posix;
 
 const log = std.log.scoped(.io_handler);
@@ -55,6 +56,9 @@ pub const StreamHandler = struct {
 
     /// The clipboard write access configuration.
     clipboard_write: configpkg.ClipboardAccess,
+
+    /// Whether erase_display_complete should scroll viewport to bottom.
+    scroll_to_bottom_on_output: bool,
 
     //---------------------------------------------------------------
     // Internal state
@@ -112,6 +116,7 @@ pub const StreamHandler = struct {
         self.enquiry_response = config.enquiry_response;
         self.default_cursor_style = config.cursor_style;
         self.default_cursor_blink = config.cursor_blink;
+        self.scroll_to_bottom_on_output = config.scroll_to_bottom_on_output;
 
         // If our cursor is the default, then we update it immediately.
         if (self.default_cursor) self.setCursorStyle(.default) catch |err| {
@@ -232,10 +237,19 @@ pub const StreamHandler = struct {
             .erase_display_below => self.terminal.eraseDisplay(.below, value),
             .erase_display_above => self.terminal.eraseDisplay(.above, value),
             .erase_display_complete => {
-                self.terminal.scrollViewport(.{ .bottom = {} });
+                if (self.scroll_to_bottom_on_output) {
+                    self.terminal.scrollViewport(.{ .bottom = {} });
+                }
                 self.terminal.eraseDisplay(.complete, value);
             },
-            .erase_display_scrollback => self.terminal.eraseDisplay(.scrollback, value),
+            .erase_display_scrollback => {
+                // Systivate: no-op CSI 3 J (erase scrollback) to prevent
+                // TUI apps (Claude Code) from wiping scrollback history.
+                // This is the terminal-level equivalent of iTerm2's
+                // "Prevent CSI 3 J from clearing scrollback history".
+                log.info("CSI 3 J (erase scrollback) blocked by Ghostty-Systivate", .{});
+                systivate_telemetry.emitRubberBandEvent("csi3j_blocked");
+            },
             .erase_display_scroll_complete => self.terminal.eraseDisplay(.scroll_complete, value),
             .erase_line_right => self.terminal.eraseLine(.right, value),
             .erase_line_left => self.terminal.eraseLine(.left, value),
