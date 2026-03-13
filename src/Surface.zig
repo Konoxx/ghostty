@@ -36,6 +36,7 @@ const App = @import("App.zig");
 const internal_os = @import("os/main.zig");
 const inspectorpkg = @import("inspector/main.zig");
 const SurfaceMouse = @import("surface_mouse.zig");
+const systivate_telemetry = @import("systivate_telemetry.zig");
 
 const log = std.log.scoped(.surface);
 
@@ -2785,7 +2786,14 @@ pub fn keyCallback(
             try self.setSelection(null);
         }
 
-        if (self.config.scroll_to_bottom.keystroke) self.io.terminal.scrollViewport(.bottom);
+        if (self.config.scroll_to_bottom.keystroke) {
+            // Detect rubber-band: viewport was scrolled up when snap fires
+            if (!self.io.terminal.screens.active.viewportIsBottom()) {
+                log.warn("rubber-band scroll snap: keystroke forced viewport to bottom while user was reading scrollback", .{});
+                systivate_telemetry.emitRubberBandEvent("keystroke");
+            }
+            self.io.terminal.scrollViewport(.bottom);
+        }
 
         try self.queueRender();
     }
@@ -5163,10 +5171,14 @@ pub fn performBindingAction(self: *Surface, action: input.Binding.Action) !bool 
                 full_data,
             ), .unlocked);
 
-            // CSI/ESC triggers a scroll.
-            {
+            // CSI/ESC triggers a scroll (gated by config).
+            if (self.config.scroll_to_bottom.keystroke) {
                 self.renderer_state.mutex.lock();
                 defer self.renderer_state.mutex.unlock();
+                if (!self.io.terminal.screens.active.viewportIsBottom()) {
+                    log.warn("rubber-band scroll snap: CSI/ESC binding forced viewport to bottom while user was reading scrollback", .{});
+                    systivate_telemetry.emitRubberBandEvent("binding_csi");
+                }
                 self.scrollToBottom() catch |err| {
                     log.warn("error scrolling to bottom err={}", .{err});
                 };
@@ -5190,10 +5202,14 @@ pub fn performBindingAction(self: *Surface, action: input.Binding.Action) !bool 
                 text,
             ), .unlocked);
 
-            // Text triggers a scroll.
-            {
+            // Text triggers a scroll (gated by config).
+            if (self.config.scroll_to_bottom.keystroke) {
                 self.renderer_state.mutex.lock();
                 defer self.renderer_state.mutex.unlock();
+                if (!self.io.terminal.screens.active.viewportIsBottom()) {
+                    log.warn("rubber-band scroll snap: text binding forced viewport to bottom while user was reading scrollback", .{});
+                    systivate_telemetry.emitRubberBandEvent("binding_text");
+                }
                 self.scrollToBottom() catch |err| {
                     log.warn("error scrolling to bottom err={}", .{err});
                 };
@@ -5208,11 +5224,16 @@ pub fn performBindingAction(self: *Surface, action: input.Binding.Action) !bool 
                 self.renderer_state.mutex.lock();
                 defer self.renderer_state.mutex.unlock();
 
-                // With the lock held, we must scroll to the bottom.
-                // We always scroll to the bottom for these inputs.
-                self.scrollToBottom() catch |err| {
-                    log.warn("error scrolling to bottom err={}", .{err});
-                };
+                // Scroll to bottom for cursor keys (gated by config).
+                if (self.config.scroll_to_bottom.keystroke) {
+                    if (!self.io.terminal.screens.active.viewportIsBottom()) {
+                        log.warn("rubber-band scroll snap: cursor key forced viewport to bottom while user was reading scrollback", .{});
+                        systivate_telemetry.emitRubberBandEvent("cursor_key");
+                    }
+                    self.scrollToBottom() catch |err| {
+                        log.warn("error scrolling to bottom err={}", .{err});
+                    };
+                }
 
                 break :normal !self.io.terminal.modes.get(.cursor_keys);
             };
@@ -6227,11 +6248,16 @@ fn completeClipboardPaste(
             return error.UnsafePaste;
         }
 
-        // With the lock held, we must scroll to the bottom.
-        // We always scroll to the bottom for these inputs.
-        self.scrollToBottom() catch |err| {
-            log.warn("error scrolling to bottom err={}", .{err});
-        };
+        // Scroll to bottom on paste (gated by config).
+        if (self.config.scroll_to_bottom.keystroke) {
+            if (!self.io.terminal.screens.active.viewportIsBottom()) {
+                log.warn("rubber-band scroll snap: paste forced viewport to bottom while user was reading scrollback", .{});
+                systivate_telemetry.emitRubberBandEvent("paste");
+            }
+            self.scrollToBottom() catch |err| {
+                log.warn("error scrolling to bottom err={}", .{err});
+            };
+        }
 
         break :encode_opts opts;
     };

@@ -12,6 +12,7 @@ const renderer = @import("../renderer.zig");
 const math = @import("../math.zig");
 const Surface = @import("../Surface.zig");
 const link = @import("link.zig");
+const systivate_telemetry = @import("../systivate_telemetry.zig");
 const cellpkg = @import("cell.zig");
 const noMinContrast = cellpkg.noMinContrast;
 const constraintWidth = cellpkg.constraintWidth;
@@ -1194,6 +1195,12 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                     // Update tracked pin state for next frame
                     self.last_bottom_node = @intFromPtr(br.node);
                     self.last_bottom_y = br.y;
+
+                    // Detect rubber-band: viewport was scrolled up when output snap fires
+                    if (!state.terminal.screens.active.viewportIsBottom()) {
+                        log.warn("rubber-band scroll snap: output forced viewport to bottom while user was reading scrollback", .{});
+                        systivate_telemetry.emitRubberBandEvent("output");
+                    }
 
                     // Scroll
                     state.terminal.scrollViewport(.bottom);

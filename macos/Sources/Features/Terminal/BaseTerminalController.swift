@@ -1543,6 +1543,6 @@ extension BaseTerminalController {
 
 extension Notification.Name {
     /// Terminal window aggregate bell state changed.
-    static let terminalWindowBellDidChangeNotification = Notification.Name("com.mitchellh.ghostty.terminalWindowBellDidChange")
+    static let terminalWindowBellDidChangeNotification = Notification.Name("com.systivate.ghostty.terminalWindowBellDidChange")
     static let terminalWindowHasBellKey = terminalWindowBellDidChangeNotification.rawValue + ".hasBell"
 }
