@@ -116,6 +116,11 @@ class TitlebarTabsVenturaTerminalWindow: TerminalWindow {
 
         updateNewTabButtonOpacity()
         updateNewTabButtonImage()
+
+        // Recalculate tab widths on every update (tab add/remove/reorder)
+        if titlebarTabs {
+            expandTabWidths()
+        }
     }
 
     override func updateConstraintsIfNeeded() {
@@ -442,6 +447,38 @@ class TitlebarTabsVenturaTerminalWindow: TerminalWindow {
 
             self?.hideToolbarOverflowButton()
             self?.hideTitleBarSeparators()
+
+            // Force tabs to fill available width (Systivate: wider tabs)
+            self?.expandTabWidths()
+        }
+    }
+
+    // MARK: Systivate — Expanded Tab Widths
+
+    /// Force NSTabButton views to fill the available tab bar width equally.
+    /// Uses deferred frame-based layout: dispatches to the next run loop iteration
+    /// so that AppKit's internal NSTabBar layout completes first, then overrides
+    /// the tab button frames to fill the available width.
+    func expandTabWidths() {
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            let buttons = self.tabButtonsInVisualOrder()
+            guard !buttons.isEmpty else { return }
+            guard let tabBar = self.tabBarView else { return }
+
+            // Available width = tab bar width minus new-tab button (~32px)
+            let newTabButtonWidth: CGFloat = 32
+            let availableWidth = tabBar.bounds.width - newTabButtonWidth
+            guard availableWidth > 0 else { return }
+
+            let tabWidth = floor(availableWidth / CGFloat(buttons.count))
+
+            for (i, button) in buttons.enumerated() {
+                var frame = button.frame
+                frame.origin.x = CGFloat(i) * tabWidth
+                frame.size.width = tabWidth
+                button.frame = frame
+            }
         }
     }
 
