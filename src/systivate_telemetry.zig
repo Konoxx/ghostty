@@ -46,6 +46,47 @@ fn emitRubberBandEventInner(trigger: []const u8) !void {
     _ = posix.write(fd, line) catch return;
 }
 
+/// Emit a watchdog event when viewport transitions from not-at-bottom to at-bottom.
+/// This catches scroll-to-bottom from ANY source, including unknown code paths.
+/// Separate rate limit from emitRubberBandEvent (5s) to reduce noise from
+/// intentional user scrolling while still catching rapid rubber-band patterns.
+pub fn emitWatchdogEvent(scroll_to_bottom_on_output: bool) void {
+    const now = std.time.milliTimestamp();
+    const watchdog_state = struct {
+        var last_emit: i64 = 0;
+    };
+    if (now - watchdog_state.last_emit < 5000) return;
+    watchdog_state.last_emit = now;
+
+    emitWatchdogEventInner(scroll_to_bottom_on_output) catch |err| {
+        log.debug("watchdog telemetry write failed: {}", .{err});
+    };
+}
+
+fn emitWatchdogEventInner(scroll_to_bottom_on_output: bool) !void {
+    const home = posix.getenv("HOME") orelse return;
+
+    var path_buf: [512]u8 = undefined;
+    const path_z = std.fmt.bufPrintZ(&path_buf, "{s}/.ccs/ghostty-events.jsonl", .{home}) catch return;
+
+    ensureDir(home) catch {};
+
+    var buf: [1024]u8 = undefined;
+    const pid = @as(i64, @intCast(std.c.getpid()));
+    const ts = std.time.timestamp();
+    const output_scroll = if (scroll_to_bottom_on_output) "true" else "false";
+    const line = std.fmt.bufPrint(&buf, "{{\"ts\":{d},\"source\":\"ghostty\",\"event\":\"viewport_watchdog\",\"severity\":\"warn\",\"trigger\":\"unknown_snap_to_bottom\",\"scroll_on_output\":{s},\"pid\":{d}}}\n", .{ ts, output_scroll, pid }) catch return;
+
+    const fd = posix.open(path_z, .{
+        .ACCMODE = .WRONLY,
+        .APPEND = true,
+        .CREAT = true,
+    }, 0o644) catch return;
+    defer posix.close(fd);
+
+    _ = posix.write(fd, line) catch return;
+}
+
 fn ensureDir(home: []const u8) !void {
     var dir_buf: [512]u8 = undefined;
     const dir_path = std.fmt.bufPrintZ(&dir_buf, "{s}/.ccs", .{home}) catch return;

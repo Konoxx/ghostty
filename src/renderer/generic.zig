@@ -132,6 +132,11 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
         last_bottom_node: ?usize,
         last_bottom_y: terminal.size.CellCountInt,
 
+        /// Systivate watchdog: tracks whether viewport was at bottom on the
+        /// previous frame. Used to detect unexpected scroll-to-bottom events
+        /// from unknown code paths (any source, not just our guarded paths).
+        last_viewport_was_bottom: bool,
+
         /// The most recent viewport matches so that we can render search
         /// matches in the visible frame. This is provided asynchronously
         /// from the search thread so we have the dirty flag to also note
@@ -710,6 +715,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 .scrollbar_dirty = false,
                 .last_bottom_node = null,
                 .last_bottom_y = 0,
+                .last_viewport_was_bottom = true,
                 .search_matches = null,
                 .search_selected_match = null,
                 .search_matches_dirty = false,
@@ -1204,6 +1210,19 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
 
                     // Scroll
                     state.terminal.scrollViewport(.bottom);
+                }
+
+                // Systivate watchdog: detect viewport-to-bottom transitions from
+                // any source. If viewport was NOT at bottom last frame but IS now,
+                // something scrolled us down. With no-keystroke + no-output config,
+                // only user manual scrolling should cause this — anything else is
+                // an unknown rubber-band source we need to investigate.
+                {
+                    const is_bottom = state.terminal.screens.active.viewportIsBottom();
+                    if (!self.last_viewport_was_bottom and is_bottom) {
+                        systivate_telemetry.emitWatchdogEvent(self.config.scroll_to_bottom_on_output);
+                    }
+                    self.last_viewport_was_bottom = is_bottom;
                 }
 
                 // Update our terminal state
