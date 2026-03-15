@@ -3034,9 +3034,14 @@ fn viewportRowOffset(self: *PageList) usize {
 }
 
 /// This fixes up the viewport data when rows are removed from the
-/// PageList. This will update a viewport to `active` if row removal
-/// puts the viewport into the active area, to `top` if the viewport
-/// is now at row 0, and updates any row offset caches as necessary.
+/// PageList. This will update a viewport to `top` if row removal
+/// puts the viewport into the active area (preserving the user's
+/// scrollback reading position), and updates any row offset caches
+/// as necessary.
+///
+/// Systivate: changed `.pin`/`.top` → `.active` transitions to
+/// `.top` instead, so that page pruning and row erasure never snap
+/// the viewport to the bottom while the user is reading scrollback.
 ///
 /// This is unit tested transitively through other tests such as
 /// eraseRows.
@@ -3047,10 +3052,11 @@ fn fixupViewport(
     switch (self.viewport) {
         .active => {},
 
-        // For pin, we check if our pin is now in the active area and if so
-        // we move our viewport back to the active area.
+        // For pin, we check if our pin is now in the active area.
+        // Systivate: instead of snapping to .active (rubber-band),
+        // we go to .top to preserve the user's scrollback position.
         .pin => if (self.pinIsActive(self.viewport_pin.*)) {
-            self.viewport = .active;
+            self.viewport = .top;
         } else if (self.viewport_pin_row_offset) |*v| {
             // If we have a cached row offset, we need to update it
             // to account for the erased rows.
@@ -3061,10 +3067,11 @@ fn fixupViewport(
             }
         },
 
-        // For top, we move back to active if our erasing moved our
-        // top page into the active area.
+        // For top, we keep it at top even if erasing moved the
+        // top page into the active area. Systivate: was .active,
+        // now stays .top to prevent rubber-band snap.
         .top => if (self.pinIsActive(.{ .node = self.pages.first.? })) {
-            self.viewport = .active;
+            self.viewport = .top;
         },
     }
 }
@@ -3138,6 +3145,15 @@ pub fn grow(self: *PageList) Allocator.Error!?*List.Node {
 
         // If we have a pin viewport cache then we need to update it.
         if (self.viewport == .pin) viewport: {
+            // Systivate: check if the viewport pin is on the page being
+            // pruned. If so, the user's view is being destroyed — go to
+            // .top (oldest surviving content) instead of leaving .pin
+            // with a relocated garbage pin.
+            if (self.viewport_pin.node == first) {
+                self.viewport = .top;
+                break :viewport;
+            }
+
             if (self.viewport_pin_row_offset) |*v| {
                 // If our offset is less than the number of rows in the
                 // pruned page, then we are now at the top.
