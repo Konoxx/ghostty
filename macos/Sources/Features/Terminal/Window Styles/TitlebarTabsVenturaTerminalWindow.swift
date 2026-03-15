@@ -167,6 +167,11 @@ class TitlebarTabsVenturaTerminalWindow: TerminalWindow {
             // so we only call this if we are opaque.
             updateTabBar()
         }
+
+        // Refresh per-tab color indicators when any terminal's background changes
+        if titlebarTabs {
+            applyTabColorIndicators(buttons: tabButtonsInVisualOrder())
+        }
     }
 
     // MARK: Tab Bar Styling
@@ -494,6 +499,76 @@ class TitlebarTabsVenturaTerminalWindow: TerminalWindow {
             button.frame = frame
         }
         CATransaction.commit()
+
+        // Apply per-tab color indicators after frames are set
+        applyTabColorIndicators(buttons: buttons)
+    }
+
+    // MARK: Systivate — Per-Tab Color Indicators
+
+    /// Layer name used to identify our color indicator sublayers.
+    private static let tabColorIndicatorLayerName = "systivateTabColorIndicator"
+
+    /// Adds a thin colored bar at the bottom of each tab button, reflecting
+    /// the terminal's background color (set via OSC 11 per-account).
+    /// Tab buttons and tabGroup.windows are in the same visual order.
+    private func applyTabColorIndicators(buttons: [NSView]) {
+        guard let windows = tabGroup?.windows, !windows.isEmpty else { return }
+
+        let barHeight: CGFloat = 3
+
+        for (i, button) in buttons.enumerated() {
+            guard i < windows.count else { break }
+
+            // Get the terminal background color for this tab's window
+            let bgColor: NSColor?
+            if let termWindow = windows[i] as? TerminalWindow {
+                bgColor = termWindow.preferredBackgroundColor
+            } else {
+                bgColor = nil
+            }
+
+            button.wantsLayer = true
+            guard let buttonLayer = button.layer else { continue }
+
+            // Find or create the indicator sublayer
+            let indicator: CALayer
+            if let existing = buttonLayer.sublayers?.first(where: { $0.name == Self.tabColorIndicatorLayerName }) {
+                indicator = existing
+            } else {
+                indicator = CALayer()
+                indicator.name = Self.tabColorIndicatorLayerName
+                indicator.zPosition = 10 // Above tab backgrounds
+                buttonLayer.addSublayer(indicator)
+            }
+
+            // Position: thin bar at the bottom of the tab
+            indicator.frame = CGRect(x: 0, y: 0, width: button.bounds.width, height: barHeight)
+
+            if let bgColor {
+                indicator.backgroundColor = Self.amplifiedTabColor(from: bgColor).cgColor
+                indicator.isHidden = false
+            } else {
+                indicator.isHidden = true
+            }
+        }
+    }
+
+    /// Takes a dark terminal background color (e.g. #0a1628) and produces a vivid
+    /// version suitable for a small visual indicator bar.
+    private static func amplifiedTabColor(from color: NSColor) -> NSColor {
+        guard let rgbColor = color.usingColorSpace(.sRGB) else { return color }
+
+        var h: CGFloat = 0, s: CGFloat = 0, b: CGFloat = 0, a: CGFloat = 0
+        rgbColor.getHue(&h, saturation: &s, brightness: &b, alpha: &a)
+
+        // Very desaturated colors (gray/white for elysium): use a subtle warm white
+        if s < 0.1 {
+            return NSColor(hue: h, saturation: 0.05, brightness: min(b * 1.2, 0.95), alpha: 0.9)
+        }
+
+        // Chromatic colors: amplify saturation and brightness to make a vivid indicator
+        return NSColor(hue: h, saturation: min(s * 3, 0.85), brightness: min(b * 5, 0.8), alpha: 0.9)
     }
 
     private func addWindowButtonsBackdrop(titlebarView: NSView, toolbarView: NSView) {
