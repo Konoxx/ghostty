@@ -137,6 +137,12 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
         /// from unknown code paths (any source, not just our guarded paths).
         last_viewport_was_bottom: bool,
 
+        /// Systivate watchdog: tracks the active screen pointer from the
+        /// previous frame. Screen switches (primary ↔ alternate) cause
+        /// false-positive watchdog events because the alt screen viewport
+        /// is always at bottom while the primary may be scrolled up.
+        last_active_screen: ?*const anyopaque,
+
         /// The most recent viewport matches so that we can render search
         /// matches in the visible frame. This is provided asynchronously
         /// from the search thread so we have the dirty flag to also note
@@ -716,6 +722,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 .last_bottom_node = null,
                 .last_bottom_y = 0,
                 .last_viewport_was_bottom = true,
+                .last_active_screen = null,
                 .search_matches = null,
                 .search_selected_match = null,
                 .search_matches_dirty = false,
@@ -1217,12 +1224,19 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 // something scrolled us down. With no-keystroke + no-output config,
                 // only user manual scrolling should cause this — anything else is
                 // an unknown rubber-band source we need to investigate.
+                //
+                // We suppress the watchdog when the active screen pointer changes
+                // (primary ↔ alternate switch) because the alt screen viewport is
+                // always at bottom, producing false positives.
                 {
+                    const current_screen: *const anyopaque = @ptrCast(state.terminal.screens.active);
+                    const screen_changed = if (self.last_active_screen) |prev| prev != current_screen else true;
                     const is_bottom = state.terminal.screens.active.viewportIsBottom();
-                    if (!self.last_viewport_was_bottom and is_bottom) {
+                    if (!self.last_viewport_was_bottom and is_bottom and !screen_changed) {
                         systivate_telemetry.emitWatchdogEvent(self.config.scroll_to_bottom_on_output);
                     }
                     self.last_viewport_was_bottom = is_bottom;
+                    self.last_active_screen = current_screen;
                 }
 
                 // Update our terminal state
