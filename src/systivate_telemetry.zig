@@ -88,6 +88,83 @@ fn emitWatchdogEventInner(scroll_to_bottom_on_output: bool, snap_reason: []const
     _ = posix.write(fd, line) catch return;
 }
 
+/// Emit a top-watchdog event when viewport transitions to .top unexpectedly.
+/// Mirrors emitWatchdogEvent but for snap-to-top transitions.
+/// Rate-limited to 5s to reduce noise from intentional scrolling.
+pub fn emitTopWatchdogEvent(snap_reason: []const u8) void {
+    const now = std.time.milliTimestamp();
+    const top_state = struct {
+        var last_emit: i64 = 0;
+    };
+    if (now - top_state.last_emit < 5000) return;
+    top_state.last_emit = now;
+
+    emitTopWatchdogEventInner(snap_reason) catch |err| {
+        log.debug("top watchdog telemetry write failed: {}", .{err});
+    };
+}
+
+fn emitTopWatchdogEventInner(snap_reason: []const u8) !void {
+    const home = posix.getenv("HOME") orelse return;
+
+    var path_buf: [512]u8 = undefined;
+    const path_z = std.fmt.bufPrintZ(&path_buf, "{s}/.ccs/ghostty-events.jsonl", .{home}) catch return;
+
+    ensureDir(home) catch {};
+
+    var buf: [1024]u8 = undefined;
+    const pid = @as(i64, @intCast(std.c.getpid()));
+    const ts = std.time.timestamp();
+    const line = std.fmt.bufPrint(&buf, "{{\"ts\":{d},\"source\":\"ghostty\",\"event\":\"viewport_watchdog\",\"severity\":\"warn\",\"trigger\":\"snap_to_top\",\"snap_reason\":\"{s}\",\"pid\":{d}}}\n", .{ ts, snap_reason, pid }) catch return;
+
+    const fd = posix.open(path_z, .{
+        .ACCMODE = .WRONLY,
+        .APPEND = true,
+        .CREAT = true,
+    }, 0o644) catch return;
+    defer posix.close(fd);
+
+    _ = posix.write(fd, line) catch return;
+}
+
+/// Emit a page pruning event when scrollback pages are recycled.
+/// Rate-limited to 10s — pruning can happen rapidly during high output.
+pub fn emitPagePruneEvent(prune_count: u32, viewport_state: []const u8) void {
+    const now = std.time.milliTimestamp();
+    const prune_state = struct {
+        var last_emit: i64 = 0;
+    };
+    if (now - prune_state.last_emit < 10000) return;
+    prune_state.last_emit = now;
+
+    emitPagePruneEventInner(prune_count, viewport_state) catch |err| {
+        log.debug("page prune telemetry write failed: {}", .{err});
+    };
+}
+
+fn emitPagePruneEventInner(prune_count: u32, viewport_state: []const u8) !void {
+    const home = posix.getenv("HOME") orelse return;
+
+    var path_buf: [512]u8 = undefined;
+    const path_z = std.fmt.bufPrintZ(&path_buf, "{s}/.ccs/ghostty-events.jsonl", .{home}) catch return;
+
+    ensureDir(home) catch {};
+
+    var buf: [1024]u8 = undefined;
+    const pid = @as(i64, @intCast(std.c.getpid()));
+    const ts = std.time.timestamp();
+    const line = std.fmt.bufPrint(&buf, "{{\"ts\":{d},\"source\":\"ghostty\",\"event\":\"page_prune\",\"severity\":\"info\",\"prune_count\":{d},\"viewport\":\"{s}\",\"pid\":{d}}}\n", .{ ts, prune_count, viewport_state, pid }) catch return;
+
+    const fd = posix.open(path_z, .{
+        .ACCMODE = .WRONLY,
+        .APPEND = true,
+        .CREAT = true,
+    }, 0o644) catch return;
+    defer posix.close(fd);
+
+    _ = posix.write(fd, line) catch return;
+}
+
 fn ensureDir(home: []const u8) !void {
     var dir_buf: [512]u8 = undefined;
     const dir_path = std.fmt.bufPrintZ(&dir_buf, "{s}/.ccs", .{home}) catch return;

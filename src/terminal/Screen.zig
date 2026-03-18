@@ -1299,6 +1299,11 @@ pub inline fn viewportIsBottom(self: Screen) bool {
     return self.pages.viewport == .active;
 }
 
+/// Systivate: returns true if the viewport is scrolled to the top of scrollback.
+pub inline fn viewportIsTop(self: Screen) bool {
+    return self.pages.viewport == .top;
+}
+
 /// Erase the region specified by tl and br, inclusive. This will physically
 /// erase the rows meaning the memory will be reclaimed (if the underlying
 /// page is empty) and other rows will be shifted up.

@@ -137,6 +137,11 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
         /// from unknown code paths (any source, not just our guarded paths).
         last_viewport_was_bottom: bool,
 
+        /// Systivate top-watchdog: tracks whether viewport was at top on the
+        /// previous frame. Detects unexpected snap-to-top transitions caused
+        /// by page pruning or fixupViewport during high-throughput output.
+        last_viewport_was_top: bool,
+
         /// Systivate watchdog: tracks the active screen pointer from the
         /// previous frame. Screen switches (primary ↔ alternate) cause
         /// false-positive watchdog events because the alt screen viewport
@@ -722,6 +727,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 .last_bottom_node = null,
                 .last_bottom_y = 0,
                 .last_viewport_was_bottom = true,
+                .last_viewport_was_top = false,
                 .last_active_screen = null,
                 .search_matches = null,
                 .search_selected_match = null,
@@ -1232,13 +1238,37 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                     const current_screen: *const anyopaque = @ptrCast(state.terminal.screens.active);
                     const screen_changed = if (self.last_active_screen) |prev| prev != current_screen else true;
                     const is_bottom = state.terminal.screens.active.viewportIsBottom();
+                    const is_top = state.terminal.screens.active.viewportIsTop();
+
+                    // Bottom watchdog: detect not-bottom → bottom transitions
                     if (!self.last_viewport_was_bottom and is_bottom and !screen_changed) {
-                        // Read the snap reason from PageList and reset it
                         const reason = state.terminal.screens.active.pages.last_snap_reason;
                         state.terminal.screens.active.pages.last_snap_reason = .none;
                         systivate_telemetry.emitWatchdogEvent(self.config.scroll_to_bottom_on_output, reason.label());
                     }
+
+                    // Systivate top-watchdog: detect not-top → top transitions.
+                    // Snap-to-top from fixup/prune paths indicates the viewport
+                    // was displaced during page pruning — the user sees content
+                    // jump to the oldest surviving scrollback.
+                    if (!self.last_viewport_was_top and is_top and !screen_changed) {
+                        const top_reason = state.terminal.screens.active.pages.last_top_snap_reason;
+                        state.terminal.screens.active.pages.last_top_snap_reason = .none;
+                        systivate_telemetry.emitTopWatchdogEvent(top_reason.label());
+                    }
+
+                    // Systivate page-prune telemetry: emit when pages have been
+                    // recycled since the last frame. Helps correlate pruning with
+                    // viewport anomalies and text artifacts.
+                    const pc = state.terminal.screens.active.pages.prune_count;
+                    if (pc > 0) {
+                        state.terminal.screens.active.pages.prune_count = 0;
+                        const vp_label: []const u8 = if (is_bottom) "active" else if (is_top) "top" else "pin";
+                        systivate_telemetry.emitPagePruneEvent(pc, vp_label);
+                    }
+
                     self.last_viewport_was_bottom = is_bottom;
+                    self.last_viewport_was_top = is_top;
                     self.last_active_screen = current_screen;
                 }
 

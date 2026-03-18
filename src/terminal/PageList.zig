@@ -173,6 +173,14 @@ viewport: Viewport,
 /// The watchdog reads and resets this to attribute snap-to-bottom events.
 last_snap_reason: SnapReason = .none,
 
+/// Systivate: reason for the last viewport → .top transition.
+/// The top-watchdog reads and resets this to attribute snap-to-top events.
+last_top_snap_reason: TopSnapReason = .none,
+
+/// Systivate: counter for page pruning events. The renderer reads and
+/// resets this to emit pruning telemetry.
+prune_count: u32 = 0,
+
 /// The pin used for when the viewport scrolls. This is always pre-allocated
 /// so that scrolling doesn't have a failable memory allocation. This should
 /// never be access directly; use `viewport`.
@@ -253,6 +261,40 @@ pub const SnapReason = enum(u8) {
             .scroll_delta_active => "scroll_delta_active",
             .scroll_delta_overflow => "scroll_delta_overflow",
             .page_prune => "page_prune",
+        };
+    }
+};
+
+/// Systivate: tracks WHY the viewport last transitioned to .top,
+/// so the top-watchdog telemetry can attribute snap-to-top events.
+/// User-initiated scrolls (explicit top, row 0, delta overflow up)
+/// are normal; fixup/prune reasons indicate anomalous behavior.
+pub const TopSnapReason = enum(u8) {
+    none = 0,
+    scroll_explicit = 1, // explicit scroll(.top) request
+    scroll_pin_top = 2, // scroll pin landed at top of pages
+    scroll_row_zero = 3, // row-based scroll to row 0
+    scroll_delta_overflow = 4, // delta scroll overflowed upward
+    scroll_prompt_top = 5, // prompt navigation landed at top
+    fixup_pin_active = 6, // fixupViewport: pin moved into active area (Systivate)
+    fixup_offset_underflow = 7, // fixupViewport: cached offset < removed rows (Systivate)
+    fixup_top_active = 8, // fixupViewport: top page in active area (Systivate)
+    prune_pin_destroyed = 9, // page pruning destroyed viewport pin's page (Systivate)
+    prune_offset_underflow = 10, // page pruning: offset < pruned page rows (Systivate)
+
+    pub fn label(self: TopSnapReason) []const u8 {
+        return switch (self) {
+            .none => "none",
+            .scroll_explicit => "scroll_explicit",
+            .scroll_pin_top => "scroll_pin_top",
+            .scroll_row_zero => "scroll_row_zero",
+            .scroll_delta_overflow => "scroll_delta_overflow",
+            .scroll_prompt_top => "scroll_prompt_top",
+            .fixup_pin_active => "fixup_pin_active",
+            .fixup_offset_underflow => "fixup_offset_underflow",
+            .fixup_top_active => "fixup_top_active",
+            .prune_pin_destroyed => "prune_pin_destroyed",
+            .prune_offset_underflow => "prune_offset_underflow",
         };
     }
 };
@@ -2516,13 +2558,17 @@ pub fn scroll(self: *PageList, behavior: Scroll) void {
             self.last_snap_reason = .scroll_explicit;
             self.viewport = .active;
         },
-        .top => self.viewport = .top,
+        .top => {
+            self.last_top_snap_reason = .scroll_explicit;
+            self.viewport = .top;
+        },
         .pin => |p| {
             if (self.pinIsActive(p)) {
                 self.last_snap_reason = .scroll_pin_active;
                 self.viewport = .active;
                 return;
             } else if (self.pinIsTop(p)) {
+                self.last_top_snap_reason = .scroll_pin_top;
                 self.viewport = .top;
                 return;
             }
@@ -2534,6 +2580,7 @@ pub fn scroll(self: *PageList, behavior: Scroll) void {
         .row => |n| row: {
             // If we're at the top, pin the top.
             if (n == 0) {
+                self.last_top_snap_reason = .scroll_row_zero;
                 self.viewport = .top;
                 break :row;
             }
@@ -2651,6 +2698,7 @@ pub fn scroll(self: *PageList, behavior: Scroll) void {
 
                         // If we overflow up we're at the top.
                         .overflow => {
+                            self.last_top_snap_reason = .scroll_delta_overflow;
                             self.viewport = .top;
                             break :delta_row;
                         },
@@ -2710,6 +2758,7 @@ pub fn scroll(self: *PageList, behavior: Scroll) void {
             // more efficient everywhere. We must check this after the
             // active check above because we prefer active if they overlap.
             if (self.pinIsTop(p)) {
+                self.last_top_snap_reason = .scroll_pin_top;
                 self.viewport = .top;
                 return;
             }
@@ -3109,11 +3158,13 @@ fn fixupViewport(
         // Systivate: instead of snapping to .active (rubber-band),
         // we go to .top to preserve the user's scrollback position.
         .pin => if (self.pinIsActive(self.viewport_pin.*)) {
+            self.last_top_snap_reason = .fixup_pin_active;
             self.viewport = .top;
         } else if (self.viewport_pin_row_offset) |*v| {
             // If we have a cached row offset, we need to update it
             // to account for the erased rows.
             if (v.* < removed) {
+                self.last_top_snap_reason = .fixup_offset_underflow;
                 self.viewport = .top;
             } else {
                 v.* -= removed;
@@ -3124,6 +3175,7 @@ fn fixupViewport(
         // top page into the active area. Systivate: was .active,
         // now stays .top to prevent rubber-band snap.
         .top => if (self.pinIsActive(.{ .node = self.pages.first.? })) {
+            self.last_top_snap_reason = .fixup_top_active;
             self.viewport = .top;
         },
     }
@@ -3196,6 +3248,9 @@ pub fn grow(self: *PageList) Allocator.Error!?*List.Node {
             break :prune;
         }
 
+        // Systivate: increment prune counter for telemetry.
+        self.prune_count += 1;
+
         // If we have a pin viewport cache then we need to update it.
         if (self.viewport == .pin) viewport: {
             // Systivate: check if the viewport pin is on the page being
@@ -3203,6 +3258,7 @@ pub fn grow(self: *PageList) Allocator.Error!?*List.Node {
             // .top (oldest surviving content) instead of leaving .pin
             // with a relocated garbage pin.
             if (self.viewport_pin.node == first) {
+                self.last_top_snap_reason = .prune_pin_destroyed;
                 self.viewport = .top;
                 break :viewport;
             }
@@ -3211,6 +3267,7 @@ pub fn grow(self: *PageList) Allocator.Error!?*List.Node {
                 // If our offset is less than the number of rows in the
                 // pruned page, then we are now at the top.
                 if (v.* < first.data.size.rows) {
+                    self.last_top_snap_reason = .prune_offset_underflow;
                     self.viewport = .top;
                     break :viewport;
                 }
