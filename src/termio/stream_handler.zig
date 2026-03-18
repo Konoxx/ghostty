@@ -243,12 +243,13 @@ pub const StreamHandler = struct {
                 self.terminal.eraseDisplay(.complete, value);
             },
             .erase_display_scrollback => {
-                // Systivate: no-op CSI 3 J (erase scrollback) to prevent
-                // TUI apps (Claude Code) from wiping scrollback history.
-                // This is the terminal-level equivalent of iTerm2's
-                // "Prevent CSI 3 J from clearing scrollback history".
-                log.info("CSI 3 J (erase scrollback) blocked by Ghostty-Systivate", .{});
-                systivate_telemetry.emitRubberBandEvent("csi3j_blocked");
+                // Systivate: allow CSI 3 J so that GhosttyRhythm's scrollback
+                // guard can periodically clear the buffer. Blocking it caused
+                // the scrollback ring buffer to fill up and produce repeating
+                // content artifacts when pages were pruned/recycled.
+                // The viewport fixup and page pruning patches already protect
+                // the user's reading position during scrollback operations.
+                self.terminal.eraseDisplay(.scrollback, value);
             },
             .erase_display_scroll_complete => self.terminal.eraseDisplay(.scroll_complete, value),
             .erase_line_right => self.terminal.eraseLine(.right, value),
