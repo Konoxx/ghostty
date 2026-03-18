@@ -3155,28 +3155,35 @@ fn fixupViewport(
         .active => {},
 
         // For pin, we check if our pin is now in the active area.
-        // Systivate: instead of snapping to .active (rubber-band),
-        // we go to .top to preserve the user's scrollback position.
+        // Systivate v2: do NOT snap to .top or .active — keep .pin.
+        // The pin is still valid (points to a real row), it just
+        // happens to be in the active area now. Keeping .pin means:
+        //   - No rubber-band (snap to bottom)
+        //   - No snap-to-top (jumps thousands of lines away)
+        //   - User sees current content without auto-scrolling
+        //   - As new output arrives, pin moves to scrollback naturally
         .pin => if (self.pinIsActive(self.viewport_pin.*)) {
+            // Pin drifted into active area — leave viewport as .pin.
+            // Record reason for telemetry but don't change viewport.
             self.last_top_snap_reason = .fixup_pin_active;
-            self.viewport = .top;
         } else if (self.viewport_pin_row_offset) |*v| {
             // If we have a cached row offset, we need to update it
             // to account for the erased rows.
             if (v.* < removed) {
+                // Offset underflow: clamp to 0 instead of snapping
+                // to .top. Keep .pin at the start of the current page.
                 self.last_top_snap_reason = .fixup_offset_underflow;
-                self.viewport = .top;
+                v.* = 0;
             } else {
                 v.* -= removed;
             }
         },
 
-        // For top, we keep it at top even if erasing moved the
-        // top page into the active area. Systivate: was .active,
-        // now stays .top to prevent rubber-band snap.
+        // For top: if all scrollback was consumed by the active area,
+        // transition to .active — there's nothing to scroll back to.
+        // Keeping .top when top IS active causes visual stutter.
         .top => if (self.pinIsActive(.{ .node = self.pages.first.? })) {
-            self.last_top_snap_reason = .fixup_top_active;
-            self.viewport = .top;
+            self.viewport = .active;
         },
     }
 }
@@ -3253,22 +3260,28 @@ pub fn grow(self: *PageList) Allocator.Error!?*List.Node {
 
         // If we have a pin viewport cache then we need to update it.
         if (self.viewport == .pin) viewport: {
-            // Systivate: check if the viewport pin is on the page being
-            // pruned. If so, the user's view is being destroyed — go to
-            // .top (oldest surviving content) instead of leaving .pin
-            // with a relocated garbage pin.
+            // Systivate v2: if pin is on the pruned page, relocate it
+            // to the new first page (oldest surviving content). Stay as
+            // .pin so we don't jump to absolute top or bottom.
             if (self.viewport_pin.node == first) {
                 self.last_top_snap_reason = .prune_pin_destroyed;
-                self.viewport = .top;
+                if (self.pages.first) |new_first| {
+                    self.viewport_pin.node = new_first;
+                    self.viewport_pin.y = 0;
+                    if (self.viewport_pin_row_offset) |*v| v.* = 0;
+                } else {
+                    // No pages left — fall back to active
+                    self.viewport = .active;
+                }
                 break :viewport;
             }
 
             if (self.viewport_pin_row_offset) |*v| {
-                // If our offset is less than the number of rows in the
-                // pruned page, then we are now at the top.
+                // Systivate v2: clamp offset instead of snapping to .top.
+                // Keep .pin at the start of the surviving scrollback.
                 if (v.* < first.data.size.rows) {
                     self.last_top_snap_reason = .prune_offset_underflow;
-                    self.viewport = .top;
+                    v.* = 0;
                     break :viewport;
                 }
 
