@@ -248,7 +248,7 @@ pub const SnapReason = enum(u8) {
     scroll_delta_overflow = 9, // delta scroll overflowed downward
     page_prune = 10, // page pruning moved viewport (fixupViewport)
 
-    pub fn label(self: SnapReason) []const u8 {
+    pub fn label(self: SnapReason) [*:0]const u8 {
         return switch (self) {
             .none => "none",
             .erase_all => "erase_all",
@@ -282,7 +282,7 @@ pub const TopSnapReason = enum(u8) {
     prune_pin_destroyed = 9, // page pruning destroyed viewport pin's page (Systivate)
     prune_offset_underflow = 10, // page pruning: offset < pruned page rows (Systivate)
 
-    pub fn label(self: TopSnapReason) []const u8 {
+    pub fn label(self: TopSnapReason) [*:0]const u8 {
         return switch (self) {
             .none => "none",
             .scroll_explicit => "scroll_explicit",

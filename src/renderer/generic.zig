@@ -13,6 +13,8 @@ const math = @import("../math.zig");
 const Surface = @import("../Surface.zig");
 const link = @import("link.zig");
 const systivate_telemetry = @import("../systivate_telemetry.zig");
+const systivate_shm = @import("../systivate_shm.zig");
+const systivate_hotswap = @import("../systivate_hotswap.zig");
 const cellpkg = @import("cell.zig");
 const noMinContrast = cellpkg.noMinContrast;
 const constraintWidth = cellpkg.constraintWidth;
@@ -814,6 +816,10 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             result.updateBgImageBuffer();
             try result.prepBackgroundImage();
 
+            // Systivate: initialize shared memory telemetry surface and hot-swap
+            systivate_shm.init();
+            systivate_hotswap.init();
+
             return result;
         }
 
@@ -1240,32 +1246,42 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                     const is_bottom = state.terminal.screens.active.viewportIsBottom();
                     const is_top = state.terminal.screens.active.viewportIsTop();
 
+                    // Get the hot-swap vtable (checks reload flag, swaps if needed)
+                    const vt = systivate_hotswap.vtable();
+
+                    // Read snap reasons from PageList
+                    const snap_reason = state.terminal.screens.active.pages.last_snap_reason;
+                    const top_snap_reason = state.terminal.screens.active.pages.last_top_snap_reason;
+                    const pc = state.terminal.screens.active.pages.prune_count;
+
                     // Bottom watchdog: detect not-bottom → bottom transitions
                     if (!self.last_viewport_was_bottom and is_bottom and !screen_changed) {
-                        const reason = state.terminal.screens.active.pages.last_snap_reason;
                         state.terminal.screens.active.pages.last_snap_reason = .none;
-                        systivate_telemetry.emitWatchdogEvent(self.config.scroll_to_bottom_on_output, reason.label());
+                        vt.emitWatchdogEvent(self.config.scroll_to_bottom_on_output, snap_reason.label());
                     }
 
-                    // Systivate top-watchdog: detect not-top → top transitions.
-                    // Snap-to-top from fixup/prune paths indicates the viewport
-                    // was displaced during page pruning — the user sees content
-                    // jump to the oldest surviving scrollback.
+                    // Top-watchdog: detect not-top → top transitions.
                     if (!self.last_viewport_was_top and is_top and !screen_changed) {
-                        const top_reason = state.terminal.screens.active.pages.last_top_snap_reason;
                         state.terminal.screens.active.pages.last_top_snap_reason = .none;
-                        systivate_telemetry.emitTopWatchdogEvent(top_reason.label());
+                        vt.emitTopWatchdogEvent(top_snap_reason.label());
                     }
 
-                    // Systivate page-prune telemetry: emit when pages have been
-                    // recycled since the last frame. Helps correlate pruning with
-                    // viewport anomalies and text artifacts.
-                    const pc = state.terminal.screens.active.pages.prune_count;
+                    // Page-prune telemetry: emit when pages have been recycled.
                     if (pc > 0) {
                         state.terminal.screens.active.pages.prune_count = 0;
-                        const vp_label: []const u8 = if (is_bottom) "active" else if (is_top) "top" else "pin";
-                        systivate_telemetry.emitPagePruneEvent(pc, vp_label);
+                        const vp_label: [*:0]const u8 = if (is_bottom) "active" else if (is_top) "top" else "pin";
+                        vt.emitPagePruneEvent(pc, vp_label);
                     }
+
+                    // Shared memory: write live viewport state every frame
+                    systivate_shm.update(.{
+                        .viewport = if (is_bottom) 0 else if (is_top) 1 else 2,
+                        .snap_reason = @intFromEnum(snap_reason),
+                        .top_snap_reason = @intFromEnum(top_snap_reason),
+                        .prune_count = pc,
+                        .scroll_on_output = self.config.scroll_to_bottom_on_output,
+                        .surface_id = @intFromPtr(current_screen),
+                    });
 
                     self.last_viewport_was_bottom = is_bottom;
                     self.last_viewport_was_top = is_top;
