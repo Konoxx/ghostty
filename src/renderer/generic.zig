@@ -1233,7 +1233,10 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                     const screen_changed = if (self.last_active_screen) |prev| prev != current_screen else true;
                     const is_bottom = state.terminal.screens.active.viewportIsBottom();
                     if (!self.last_viewport_was_bottom and is_bottom and !screen_changed) {
-                        systivate_telemetry.emitWatchdogEvent(self.config.scroll_to_bottom_on_output);
+                        // Read the snap reason from PageList and reset it
+                        const reason = state.terminal.screens.active.pages.last_snap_reason;
+                        state.terminal.screens.active.pages.last_snap_reason = .none;
+                        systivate_telemetry.emitWatchdogEvent(self.config.scroll_to_bottom_on_output, reason.label());
                     }
                     self.last_viewport_was_bottom = is_bottom;
                     self.last_active_screen = current_screen;

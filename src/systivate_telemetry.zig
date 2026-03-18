@@ -48,9 +48,10 @@ fn emitRubberBandEventInner(trigger: []const u8) !void {
 
 /// Emit a watchdog event when viewport transitions from not-at-bottom to at-bottom.
 /// This catches scroll-to-bottom from ANY source, including unknown code paths.
+/// Now includes snap_reason from PageList to attribute the specific code path.
 /// Separate rate limit from emitRubberBandEvent (5s) to reduce noise from
 /// intentional user scrolling while still catching rapid rubber-band patterns.
-pub fn emitWatchdogEvent(scroll_to_bottom_on_output: bool) void {
+pub fn emitWatchdogEvent(scroll_to_bottom_on_output: bool, snap_reason: []const u8) void {
     const now = std.time.milliTimestamp();
     const watchdog_state = struct {
         var last_emit: i64 = 0;
@@ -58,12 +59,12 @@ pub fn emitWatchdogEvent(scroll_to_bottom_on_output: bool) void {
     if (now - watchdog_state.last_emit < 5000) return;
     watchdog_state.last_emit = now;
 
-    emitWatchdogEventInner(scroll_to_bottom_on_output) catch |err| {
+    emitWatchdogEventInner(scroll_to_bottom_on_output, snap_reason) catch |err| {
         log.debug("watchdog telemetry write failed: {}", .{err});
     };
 }
 
-fn emitWatchdogEventInner(scroll_to_bottom_on_output: bool) !void {
+fn emitWatchdogEventInner(scroll_to_bottom_on_output: bool, snap_reason: []const u8) !void {
     const home = posix.getenv("HOME") orelse return;
 
     var path_buf: [512]u8 = undefined;
@@ -75,7 +76,7 @@ fn emitWatchdogEventInner(scroll_to_bottom_on_output: bool) !void {
     const pid = @as(i64, @intCast(std.c.getpid()));
     const ts = std.time.timestamp();
     const output_scroll = if (scroll_to_bottom_on_output) "true" else "false";
-    const line = std.fmt.bufPrint(&buf, "{{\"ts\":{d},\"source\":\"ghostty\",\"event\":\"viewport_watchdog\",\"severity\":\"warn\",\"trigger\":\"unknown_snap_to_bottom\",\"scroll_on_output\":{s},\"pid\":{d}}}\n", .{ ts, output_scroll, pid }) catch return;
+    const line = std.fmt.bufPrint(&buf, "{{\"ts\":{d},\"source\":\"ghostty\",\"event\":\"viewport_watchdog\",\"severity\":\"warn\",\"trigger\":\"snap_to_bottom\",\"snap_reason\":\"{s}\",\"scroll_on_output\":{s},\"pid\":{d}}}\n", .{ ts, snap_reason, output_scroll, pid }) catch return;
 
     const fd = posix.open(path_z, .{
         .ACCMODE = .WRONLY,

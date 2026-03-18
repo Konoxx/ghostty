@@ -169,6 +169,10 @@ tracked_pins: PinSet,
 ///
 viewport: Viewport,
 
+/// Systivate: reason for the last viewport → .active transition.
+/// The watchdog reads and resets this to attribute snap-to-bottom events.
+last_snap_reason: SnapReason = .none,
+
 /// The pin used for when the viewport scrolls. This is always pre-allocated
 /// so that scrolling doesn't have a failable memory allocation. This should
 /// never be access directly; use `viewport`.
@@ -218,6 +222,39 @@ pub const Viewport = union(enum) {
     /// s.viewport_pin hence this has no value. We force that value to prevent
     /// allocations.
     pin,
+};
+
+/// Systivate: tracks WHY the viewport last transitioned to .active,
+/// so the watchdog telemetry can attribute snap-to-bottom events to
+/// specific code paths instead of logging "unknown_snap_to_bottom".
+pub const SnapReason = enum(u8) {
+    none = 0,
+    erase_all = 1, // eraseRows cleared all scrollback
+    resize = 2, // terminal resize moved viewport pin into active area
+    scroll_explicit = 3, // explicit scroll(.active) request
+    scroll_pin_active = 4, // scroll pin landed in active area
+    scroll_row_clamp = 5, // row-based scroll clamped to active area
+    scroll_row_cast_overflow = 6, // row scroll cast overflow fallback
+    scroll_row_miss = 7, // row scroll couldn't find target offset
+    scroll_delta_active = 8, // delta scroll moved pin into active area
+    scroll_delta_overflow = 9, // delta scroll overflowed downward
+    page_prune = 10, // page pruning moved viewport (fixupViewport)
+
+    pub fn label(self: SnapReason) []const u8 {
+        return switch (self) {
+            .none => "none",
+            .erase_all => "erase_all",
+            .resize => "resize",
+            .scroll_explicit => "scroll_explicit",
+            .scroll_pin_active => "scroll_pin_active",
+            .scroll_row_clamp => "scroll_row_clamp",
+            .scroll_row_cast_overflow => "scroll_row_cast_overflow",
+            .scroll_row_miss => "scroll_row_miss",
+            .scroll_delta_active => "scroll_delta_active",
+            .scroll_delta_overflow => "scroll_delta_overflow",
+            .page_prune => "page_prune",
+        };
+    }
 };
 
 /// Returns the minimum valid "max size" for a given number of rows and cols
@@ -749,6 +786,7 @@ pub fn reset(self: *PageList) void {
     }
 
     // Move our viewport back to the active area since everything is gone.
+    self.last_snap_reason = .erase_all;
     self.viewport = .active;
 }
 
@@ -996,6 +1034,7 @@ pub fn resize(self: *PageList, opts: Resize) Allocator.Error!void {
     // space. We need to check for this case and fix it up.
     switch (self.viewport) {
         .pin => if (self.pinIsActive(self.viewport_pin.*)) {
+            self.last_snap_reason = .resize;
             self.viewport = .active;
         },
         .active, .top => {},
@@ -2125,6 +2164,7 @@ fn resizeWithoutReflow(self: *PageList, opts: Resize) Allocator.Error!void {
                 // area, since that will lead to all sorts of problems.
                 switch (self.viewport) {
                     .pin => if (self.pinIsActive(self.viewport_pin.*)) {
+                        self.last_snap_reason = .resize;
                         self.viewport = .active;
                     },
                     .active, .top => {},
@@ -2466,15 +2506,20 @@ pub fn scroll(self: *PageList, behavior: Scroll) void {
 
     // Special case no-scrollback mode to never allow scrolling.
     if (self.explicit_max_size == 0) {
+        self.last_snap_reason = .scroll_explicit;
         self.viewport = .active;
         return;
     }
 
     switch (behavior) {
-        .active => self.viewport = .active,
+        .active => {
+            self.last_snap_reason = .scroll_explicit;
+            self.viewport = .active;
+        },
         .top => self.viewport = .top,
         .pin => |p| {
             if (self.pinIsActive(p)) {
+                self.last_snap_reason = .scroll_pin_active;
                 self.viewport = .active;
                 return;
             } else if (self.pinIsTop(p)) {
@@ -2495,6 +2540,7 @@ pub fn scroll(self: *PageList, behavior: Scroll) void {
 
             // If we're below the top of the active area, pin the active area.
             if (n >= self.total_rows - self.rows) {
+                self.last_snap_reason = .scroll_row_clamp;
                 self.viewport = .active;
                 break :row;
             }
@@ -2532,6 +2578,7 @@ pub fn scroll(self: *PageList, behavior: Scroll) void {
                     size.CellCountInt,
                     n,
                 ) orelse {
+                    self.last_snap_reason = .scroll_row_cast_overflow;
                     self.viewport = .active;
                     break :row;
                 };
@@ -2553,6 +2600,7 @@ pub fn scroll(self: *PageList, behavior: Scroll) void {
                     size.CellCountInt,
                     self.total_rows - n,
                 ) orelse {
+                    self.last_snap_reason = .scroll_row_cast_overflow;
                     self.viewport = .active;
                     break :row;
                 };
@@ -2571,6 +2619,7 @@ pub fn scroll(self: *PageList, behavior: Scroll) void {
 
             // If we reached here, then we couldn't find the offset.
             // This feels impossible? Just clamp to active, screw it lol.
+            self.last_snap_reason = .scroll_row_miss;
             self.viewport = .active;
         },
         .delta_prompt => |n| self.scrollPrompt(n),
@@ -2612,6 +2661,7 @@ pub fn scroll(self: *PageList, behavior: Scroll) void {
                         // check if we're in the active area.
                         .offset => |new_pin| {
                             if (self.pinIsActive(new_pin)) {
+                                self.last_snap_reason = .scroll_delta_active;
                                 self.viewport = .active;
                             } else {
                                 self.viewport_pin.* = new_pin;
@@ -2624,6 +2674,7 @@ pub fn scroll(self: *PageList, behavior: Scroll) void {
 
                         // If we overflow down we're at active.
                         .overflow => {
+                            self.last_snap_reason = .scroll_delta_overflow;
                             self.viewport = .active;
                             break :delta_row;
                         },
@@ -2650,6 +2701,7 @@ pub fn scroll(self: *PageList, behavior: Scroll) void {
             // active area, you usually expect that the viewport will now
             // follow the active area.
             if (self.pinIsActive(p)) {
+                self.last_snap_reason = .scroll_delta_active;
                 self.viewport = .active;
                 return;
             }
@@ -2717,6 +2769,7 @@ fn scrollPrompt(self: *PageList, delta: isize) void {
     // into the active area. Otherwise, we scroll up to the pin.
     if (prompt_pin) |p| {
         if (self.pinIsActive(p)) {
+            self.last_snap_reason = .scroll_delta_active;
             self.viewport = .active;
         } else {
             self.viewport_pin.* = p;
