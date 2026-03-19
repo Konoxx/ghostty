@@ -160,3 +160,13 @@ fn writeEventFull(
 
     _ = posix.write(fd, line) catch return;
 }
+
+// ── Behavioral flags ──
+// The hot-swap loader calls this after dlopen to set runtime behavior.
+// Return values (viewport fixup strategy):
+//   0 = v2_keep_pin   — keep .pin when pin drifts into active area
+//   1 = v1_snap_top   — snap to .top (legacy Systivate)
+//   2 = v0_snap_active — snap to .active (original Ghostty, rubber-band)
+export fn systivate_getFixupMode() u8 {
+    return 0; // v2: keep pin (the fix for snap-to-top)
+}

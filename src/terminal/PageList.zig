@@ -9,6 +9,7 @@ const build_options = @import("terminal_options");
 const Allocator = std.mem.Allocator;
 const assert = @import("../quirks.zig").inlineAssert;
 const fastmem = @import("../fastmem.zig");
+const systivate_flags = @import("../systivate_flags.zig");
 const tripwire = @import("../tripwire.zig");
 const DoublyLinkedList = @import("../datastruct/main.zig").IntrusiveDoublyLinkedList;
 const color = @import("color.zig");
@@ -3151,39 +3152,60 @@ fn fixupViewport(
     self: *PageList,
     removed: usize,
 ) void {
+    // Hot-swappable viewport fixup strategy. The dylib sets this flag
+    // via systivate_getFixupMode(); default 0 = v2 (keep pin).
+    const mode = systivate_flags.fixup_mode.load(.acquire);
+
     switch (self.viewport) {
         .active => {},
 
-        // For pin, we check if our pin is now in the active area.
-        // Systivate v2: do NOT snap to .top or .active — keep .pin.
-        // The pin is still valid (points to a real row), it just
-        // happens to be in the active area now. Keeping .pin means:
-        //   - No rubber-band (snap to bottom)
-        //   - No snap-to-top (jumps thousands of lines away)
-        //   - User sees current content without auto-scrolling
-        //   - As new output arrives, pin moves to scrollback naturally
         .pin => if (self.pinIsActive(self.viewport_pin.*)) {
-            // Pin drifted into active area — leave viewport as .pin.
-            // Record reason for telemetry but don't change viewport.
             self.last_top_snap_reason = .fixup_pin_active;
+            switch (mode) {
+                // v2: keep .pin — don't snap anywhere. Pin is valid,
+                // just in the active area. No rubber-band, no snap-to-top.
+                0 => {},
+                // v1: snap to .top (legacy Systivate)
+                1 => {
+                    self.viewport = .top;
+                },
+                // v0: snap to .active (original Ghostty — rubber-band)
+                2 => {
+                    self.viewport = .active;
+                },
+                else => {},
+            }
         } else if (self.viewport_pin_row_offset) |*v| {
-            // If we have a cached row offset, we need to update it
-            // to account for the erased rows.
             if (v.* < removed) {
-                // Offset underflow: clamp to 0 instead of snapping
-                // to .top. Keep .pin at the start of the current page.
                 self.last_top_snap_reason = .fixup_offset_underflow;
-                v.* = 0;
+                switch (mode) {
+                    0 => v.* = 0, // v2: clamp offset, keep .pin
+                    1 => {
+                        self.viewport = .top;
+                    }, // v1: snap to top
+                    2 => {
+                        self.viewport = .active;
+                    }, // v0: snap to bottom
+                    else => v.* = 0,
+                }
             } else {
                 v.* -= removed;
             }
         },
 
-        // For top: if all scrollback was consumed by the active area,
-        // transition to .active — there's nothing to scroll back to.
-        // Keeping .top when top IS active causes visual stutter.
         .top => if (self.pinIsActive(.{ .node = self.pages.first.? })) {
-            self.viewport = .active;
+            switch (mode) {
+                0 => {
+                    self.viewport = .active;
+                }, // v2: no scrollback left, go active
+                1 => {}, // v1: stay .top
+                2 => {
+                    self.viewport = .active;
+                }, // v0: go active
+                else => {
+                    self.viewport = .active;
+                },
+            }
         },
     }
 }
@@ -3260,28 +3282,51 @@ pub fn grow(self: *PageList) Allocator.Error!?*List.Node {
 
         // If we have a pin viewport cache then we need to update it.
         if (self.viewport == .pin) viewport: {
-            // Systivate v2: if pin is on the pruned page, relocate it
-            // to the new first page (oldest surviving content). Stay as
-            // .pin so we don't jump to absolute top or bottom.
+            const prune_mode = systivate_flags.fixup_mode.load(.acquire);
+
             if (self.viewport_pin.node == first) {
                 self.last_top_snap_reason = .prune_pin_destroyed;
-                if (self.pages.first) |new_first| {
-                    self.viewport_pin.node = new_first;
-                    self.viewport_pin.y = 0;
-                    if (self.viewport_pin_row_offset) |*v| v.* = 0;
-                } else {
-                    // No pages left — fall back to active
-                    self.viewport = .active;
+                switch (prune_mode) {
+                    // v2: relocate pin to new first page
+                    0 => if (self.pages.first) |new_first| {
+                        self.viewport_pin.node = new_first;
+                        self.viewport_pin.y = 0;
+                        if (self.viewport_pin_row_offset) |*v| v.* = 0;
+                    } else {
+                        self.viewport = .active;
+                    },
+                    // v1: snap to top
+                    1 => {
+                        self.viewport = .top;
+                    },
+                    // v0: snap to active (rubber-band)
+                    2 => {
+                        self.viewport = .active;
+                    },
+                    else => if (self.pages.first) |new_first| {
+                        self.viewport_pin.node = new_first;
+                        self.viewport_pin.y = 0;
+                        if (self.viewport_pin_row_offset) |*v| v.* = 0;
+                    } else {
+                        self.viewport = .active;
+                    },
                 }
                 break :viewport;
             }
 
             if (self.viewport_pin_row_offset) |*v| {
-                // Systivate v2: clamp offset instead of snapping to .top.
-                // Keep .pin at the start of the surviving scrollback.
                 if (v.* < first.data.size.rows) {
                     self.last_top_snap_reason = .prune_offset_underflow;
-                    v.* = 0;
+                    switch (prune_mode) {
+                        0 => v.* = 0, // v2: clamp offset
+                        1 => {
+                            self.viewport = .top;
+                        }, // v1: snap top
+                        2 => {
+                            self.viewport = .active;
+                        }, // v0: snap bottom
+                        else => v.* = 0,
+                    }
                     break :viewport;
                 }
 

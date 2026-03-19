@@ -14,6 +14,7 @@ const log = std.log.scoped(.systivate_hotswap);
 
 // Fallback: direct import for when no dylib is loaded
 const builtin_telemetry = @import("systivate_telemetry.zig");
+const systivate_flags = @import("systivate_flags.zig");
 
 // ── VTable: the interface between renderer and telemetry implementation ──
 
@@ -142,6 +143,16 @@ fn loadDylib(path: [*:0]const u8) void {
     current_vtable = new_vtable;
     dylib_version += 1;
 
+    // Load behavioral flags from the dylib (optional symbols).
+    // systivate_getFixupMode returns the viewport fixup strategy:
+    //   0 = v2_keep_pin (default), 1 = v1_snap_top, 2 = v0_snap_active
+    if (dlsym(handle, "systivate_getFixupMode")) |sym| {
+        const getMode: *const fn () u8 = @ptrCast(@alignCast(sym));
+        const mode = getMode();
+        systivate_flags.fixup_mode.store(mode, .release);
+        log.info("dylib set fixup_mode={d}", .{mode});
+    }
+
     log.info("loaded telemetry dylib v{d} from {s}", .{ dylib_version, std.mem.sliceTo(path, 0) });
 }
 
@@ -156,7 +167,8 @@ fn performReload() void {
             dylib_handle = null;
         }
         current_vtable = builtin_vtable;
-        log.info("hot-swap: reverted to builtin telemetry", .{});
+        systivate_flags.fixup_mode.store(0, .release);
+        log.info("hot-swap: reverted to builtin telemetry (fixup_mode=0)", .{});
     }
 }
 
