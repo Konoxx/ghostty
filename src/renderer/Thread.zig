@@ -109,6 +109,11 @@ flags: packed struct {
     focused: bool = true,
 } = .{},
 
+/// Systivate: frame counter for background tab throttling.
+/// Incremented each time drawFrame() is called while unfocused.
+/// Only renders when counter % 30 == 0 (~2fps at 60Hz).
+bg_frame_counter: u32 = 0,
+
 pub const DerivedConfig = struct {
     custom_shader_animation: configpkg.CustomShaderAnimation,
 
@@ -276,10 +281,11 @@ fn setQosClass(self: *const Thread) void {
         // general forced updates and CPU usage i.e. a rebuild cells call.
         if (!self.flags.visible) break :class .utility;
 
-        // If we're not focused, but we're visible, then we set a higher
-        // than default priority because framerates still matter but it isn't
-        // as important as when we're focused.
-        if (!self.flags.focused) break :class .user_initiated;
+        // Systivate: unfocused tabs get utility priority (same as occluded).
+        // With 30+ tabs, background rendering is almost entirely wasted work.
+        // Original Ghostty uses .user_initiated here but that's too high for
+        // a 34-tab setup where only 1 tab is visible.
+        if (!self.flags.focused) break :class .utility;
 
         // We are focused and visible, we are the definition of user interactive.
         break :class .user_interactive;
@@ -494,6 +500,15 @@ fn changeConfig(self: *Thread, config: *const DerivedConfig) !void {
 fn drawFrame(self: *Thread, now: bool) void {
     // If we're invisible, we do not draw.
     if (!self.flags.visible) return;
+
+    // Systivate: throttle unfocused tab rendering to ~2fps.
+    // With 30+ tabs only 1 is focused; rendering the other 33 at 60fps
+    // wastes ~97% of GPU time. Skip 29 of every 30 frames for background tabs.
+    // Forced draws (now=true) always go through to keep terminal state consistent.
+    if (!now and !self.flags.focused) {
+        self.bg_frame_counter +%= 1;
+        if (self.bg_frame_counter % 30 != 0) return;
+    }
 
     // If the renderer is managing a vsync on its own, we only draw
     // when we're forced to via `now`.

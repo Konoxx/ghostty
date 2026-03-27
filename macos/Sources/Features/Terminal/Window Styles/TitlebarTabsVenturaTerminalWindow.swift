@@ -9,6 +9,8 @@ class TitlebarTabsVenturaTerminalWindow: TerminalWindow {
     /// This is used to determine if certain elements should be drawn light or dark and should
     /// be updated whenever the window background color or surrounding elements changes.
     fileprivate var isLightTheme: Bool = false
+    /// Last known tab count — used to skip expandTabWidths() when nothing changed.
+    private var lastKnownTabCount: Int = -1
 
     lazy var titlebarColor: NSColor = backgroundColor {
         didSet {
@@ -117,19 +119,24 @@ class TitlebarTabsVenturaTerminalWindow: TerminalWindow {
         updateNewTabButtonOpacity()
         updateNewTabButtonImage()
 
-        // Recalculate tab widths on every update (tab add/remove/reorder)
+        // Recalculate tab widths only when tab count changes, not every frame.
+        // Running expandTabWidths() unconditionally posts async frame mutations
+        // on every tab button per frame, which re-triggers constraint layout,
+        // saturating the main thread at high tab counts.
         if titlebarTabs {
-            expandTabWidths()
+            let tabCount = tabbedWindows?.count ?? 1
+            if tabCount != lastKnownTabCount {
+                lastKnownTabCount = tabCount
+                expandTabWidths()
+            }
         }
     }
 
     override func updateConstraintsIfNeeded() {
         super.updateConstraintsIfNeeded()
-
-        if titlebarTabs {
-            hideToolbarOverflowButton()
-            hideTitleBarSeparators()
-        }
+        // Note: hideToolbarOverflowButton/hideTitleBarSeparators are already
+        // called in update(). Calling them here too re-walks the view hierarchy
+        // on every constraint pass, which is expensive at 30+ tabs.
     }
 
     override func mergeAllWindows(_ sender: Any?) {

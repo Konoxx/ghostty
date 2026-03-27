@@ -30,4 +30,8 @@ if ghostty_init(UInt(CommandLine.argc), CommandLine.unsafeArgv) != GHOSTTY_SUCCE
 // action is a command starting with a `+`, such as `ghostty +boo`.
 ghostty_cli_try_action()
 
+// Install crash logging before entering the run loop — signal handlers and
+// breadcrumbs must be in place before anything can crash.
+GhosttyFailureRhythm.shared.install()
+
 _ = NSApplicationMain(CommandLine.argc, CommandLine.unsafeArgv)

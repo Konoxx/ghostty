@@ -15,6 +15,8 @@ const link = @import("link.zig");
 const systivate_telemetry = @import("../systivate_telemetry.zig");
 const systivate_shm = @import("../systivate_shm.zig");
 const systivate_hotswap = @import("../systivate_hotswap.zig");
+const systivate_crash = @import("../systivate_crash.zig");
+const systivate_ipc = @import("../systivate_ipc.zig");
 const cellpkg = @import("cell.zig");
 const noMinContrast = cellpkg.noMinContrast;
 const constraintWidth = cellpkg.constraintWidth;
@@ -816,9 +818,11 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             result.updateBgImageBuffer();
             try result.prepBackgroundImage();
 
-            // Systivate: initialize shared memory telemetry surface and hot-swap
+            // Systivate: initialize shared memory telemetry surface, hot-swap, crash handler, and IPC
             systivate_shm.init();
             systivate_hotswap.init();
+            systivate_crash.init();
+            systivate_ipc.init();
 
             return result;
         }
@@ -1249,31 +1253,42 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                     // Get the hot-swap vtable (checks reload flag, swaps if needed)
                     const vt = systivate_hotswap.vtable();
 
-                    // Read snap reasons from PageList
+                    // Read snap reasons from PageList — snapshot and reset atomically
+                    // to minimize time holding the terminal lock. File I/O happens
+                    // after the lock is released (deferred below).
                     const snap_reason = state.terminal.screens.active.pages.last_snap_reason;
                     const top_snap_reason = state.terminal.screens.active.pages.last_top_snap_reason;
                     const pc = state.terminal.screens.active.pages.prune_count;
 
+                    // Acquire fence: ensure we see the latest viewport fixup writes
+                    // from the I/O thread's prune path before reading snap reasons.
+                    @fence(.acquire);
+
+                    var deferred_bottom_watchdog = false;
+                    var deferred_top_watchdog = false;
+                    var deferred_prune: u32 = 0;
+                    var deferred_vp_label: [*:0]const u8 = "active";
+
                     // Bottom watchdog: detect not-bottom → bottom transitions
                     if (!self.last_viewport_was_bottom and is_bottom and !screen_changed) {
                         state.terminal.screens.active.pages.last_snap_reason = .none;
-                        vt.emitWatchdogEvent(self.config.scroll_to_bottom_on_output, snap_reason.label());
+                        deferred_bottom_watchdog = true;
                     }
 
                     // Top-watchdog: detect not-top → top transitions.
                     if (!self.last_viewport_was_top and is_top and !screen_changed) {
                         state.terminal.screens.active.pages.last_top_snap_reason = .none;
-                        vt.emitTopWatchdogEvent(top_snap_reason.label());
+                        deferred_top_watchdog = true;
                     }
 
-                    // Page-prune telemetry: emit when pages have been recycled.
+                    // Page-prune telemetry: snapshot count, reset immediately.
                     if (pc > 0) {
                         state.terminal.screens.active.pages.prune_count = 0;
-                        const vp_label: [*:0]const u8 = if (is_bottom) "active" else if (is_top) "top" else "pin";
-                        vt.emitPagePruneEvent(pc, vp_label);
+                        deferred_prune = pc;
+                        deferred_vp_label = if (is_bottom) "active" else if (is_top) "top" else "pin";
                     }
 
-                    // Shared memory: write live viewport state every frame
+                    // Shared memory: write live viewport state every frame (fast, no I/O)
                     systivate_shm.update(.{
                         .viewport = if (is_bottom) 0 else if (is_top) 1 else 2,
                         .snap_reason = @intFromEnum(snap_reason),
@@ -1282,6 +1297,20 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                         .scroll_on_output = self.config.scroll_to_bottom_on_output,
                         .surface_id = @intFromPtr(current_screen),
                     });
+
+                    // Deferred telemetry emission — file I/O happens here,
+                    // after SHM update and snap reason resets. This keeps
+                    // the PageList field reset fast and moves slow I/O to
+                    // the end of the viewport processing block.
+                    if (deferred_bottom_watchdog) {
+                        vt.emitWatchdogEvent(self.config.scroll_to_bottom_on_output, snap_reason.label());
+                    }
+                    if (deferred_top_watchdog) {
+                        vt.emitTopWatchdogEvent(top_snap_reason.label());
+                    }
+                    if (deferred_prune > 0) {
+                        vt.emitPagePruneEvent(deferred_prune, deferred_vp_label);
+                    }
 
                     self.last_viewport_was_bottom = is_bottom;
                     self.last_viewport_was_top = is_top;

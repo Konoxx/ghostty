@@ -125,7 +125,8 @@ pub fn update(state: struct {
     const seq = ptr.seq.load(.acquire);
     ptr.seq.store(seq +% 1, .release);
 
-    // Write state
+    // Write state — capture old prune_count BEFORE overwriting for timestamp comparison
+    const old_prune_count = ptr.prune_count;
     ptr.viewport = state.viewport;
     ptr.last_snap_reason = state.snap_reason;
     ptr.last_top_snap_reason = state.top_snap_reason;
@@ -141,7 +142,7 @@ pub fn update(state: struct {
     if (state.top_snap_reason != 0 and state.viewport == 1) {
         ptr.last_snap_to_top_ts = now;
     }
-    if (state.prune_count != ptr.prune_count) {
+    if (state.prune_count != old_prune_count) {
         ptr.last_prune_ts = now;
     }
 

@@ -815,10 +815,11 @@ pub fn reset(self: *PageList) void {
     // and mark them as garbage, because it got mangled in a way where
     // semantically it really doesn't make sense.
     {
+        const first_node = self.pages.first orelse @panic("initPages: no pages after reset");
         var it = self.tracked_pins.iterator();
         while (it.next()) |entry| {
             const p: *Pin = entry.key_ptr.*;
-            p.node = self.pages.first.?;
+            p.node = first_node;
             p.x = 0;
             p.y = 0;
             p.garbage = true;
@@ -2711,7 +2712,16 @@ pub fn scroll(self: *PageList, behavior: Scroll) void {
                         .offset => |new_pin| {
                             if (self.pinIsActive(new_pin)) {
                                 self.last_snap_reason = .scroll_delta_active;
-                                self.viewport = .active;
+                                // Systivate: respect fixup_mode for delta scroll.
+                                // Mode 0 (v2): keep pin in active area instead of
+                                // snapping viewport to .active (prevents rubber-band).
+                                const mode = systivate_flags.fixup_mode.load(.acquire);
+                                if (mode == 0) {
+                                    self.viewport_pin.* = new_pin;
+                                    self.viewport_pin_row_offset = null;
+                                } else {
+                                    self.viewport = .active;
+                                }
                             } else {
                                 self.viewport_pin.* = new_pin;
                                 if (self.viewport_pin_row_offset) |*v| {
@@ -2749,9 +2759,21 @@ pub fn scroll(self: *PageList, behavior: Scroll) void {
             // But in a terminal when you get to the bottom and back into the
             // active area, you usually expect that the viewport will now
             // follow the active area.
+            //
+            // Systivate: in fixup_mode 0 (v2), keep the pin at the
+            // calculated position instead of snapping to .active. This
+            // prevents the rubber-band where a small scroll overshoot
+            // jumps you to the absolute bottom, losing your place.
             if (self.pinIsActive(p)) {
                 self.last_snap_reason = .scroll_delta_active;
-                self.viewport = .active;
+                const mode = systivate_flags.fixup_mode.load(.acquire);
+                if (mode == 0) {
+                    self.viewport_pin.* = p;
+                    self.viewport = .pin;
+                    self.viewport_pin_row_offset = null;
+                } else {
+                    self.viewport = .active;
+                }
                 return;
             }
 
@@ -3193,19 +3215,26 @@ fn fixupViewport(
             }
         },
 
-        .top => if (self.pinIsActive(.{ .node = self.pages.first.? })) {
-            switch (mode) {
-                0 => {
-                    self.viewport = .active;
-                }, // v2: no scrollback left, go active
-                1 => {}, // v1: stay .top
-                2 => {
-                    self.viewport = .active;
-                }, // v0: go active
-                else => {
-                    self.viewport = .active;
-                },
+        .top => if (self.pages.first) |first_node| {
+            if (self.pinIsActive(.{ .node = first_node })) {
+                switch (mode) {
+                    0 => {
+                        self.viewport = .active;
+                    }, // v2: no scrollback left, go active
+                    1 => {}, // v1: stay .top
+                    2 => {
+                        self.viewport = .active;
+                    }, // v0: go active
+                    else => {
+                        self.viewport = .active;
+                    },
+                }
             }
+        } else {
+            // pages.first is null — no pages at all, force active viewport.
+            // Without this guard, .? on null is undefined behavior in ReleaseFast
+            // (ARM64 reads zeros instead of faulting → silent corruption).
+            self.viewport = .active;
         },
     }
 }
@@ -3218,6 +3247,12 @@ fn fixupViewport(
 /// required in some cases if the active area has a large number of
 /// graphemes, styles, etc.
 pub fn maxSize(self: *const PageList) usize {
+    const override_val = systivate_flags.scrollback_override.load(.acquire);
+    if (override_val > 0) {
+        // Adaptive scrollback: ProcessRhythm requested a reduced limit.
+        // We can never go below min_max_size (active area + algorithm headroom).
+        return @max(override_val, self.min_max_size);
+    }
     return @max(self.explicit_max_size, self.min_max_size);
 }
 
@@ -3339,14 +3374,46 @@ pub fn grow(self: *PageList) Allocator.Error!?*List.Node {
         // Update any tracked pins that point to this page to point to the
         // new first page to the top-left, and mark them as garbage.
         const pin_keys = self.tracked_pins.keys();
+        const new_first = self.pages.first orelse {
+            // No pages left after prune — this shouldn't happen but guard against UB.
+            self.viewport = .active;
+            break :prune;
+        };
         for (pin_keys) |p| {
             if (p.node != first) continue;
-            p.node = self.pages.first.?;
+            p.node = new_first;
             p.y = 0;
             p.x = 0;
             p.garbage = true;
         }
         self.viewport_pin.garbage = false;
+
+        // Systivate: memory fence after viewport fixup and pin updates.
+        // The renderer thread reads viewport state concurrently.
+        // Ensure all viewport/pin writes are visible before we destroy
+        // or zero the pruned page's memory. Without this fence, the
+        // renderer can see the old pages.first (freed) with the new
+        // viewport state, causing a use-after-free crash.
+        @fence(.release);
+
+        // Systivate: lightweight production integrity check.
+        // Verify viewport pin doesn't reference the page we're about to free.
+        // This runs in ALL build modes including ReleaseFast.
+        if (self.viewport == .pin and self.viewport_pin.node == first) {
+            // This should never happen after the fixup above.
+            // If it does, crash with a diagnostic instead of silently corrupting.
+            @import("systivate_telemetry.zig").emitCrashDiagnostic(
+                "viewport_pin_references_freed_page",
+                @intFromPtr(first),
+            );
+            // Relocate to first page as emergency fixup
+            if (self.pages.first) |new_first| {
+                self.viewport_pin.node = new_first;
+                self.viewport_pin.y = 0;
+            } else {
+                self.viewport = .active;
+            }
+        }
 
         // Non-standard pages can't be reused, just destroy them.
         if (first.data.memory.len > std_size) {
@@ -5092,7 +5159,18 @@ pub fn pageIterator(
 pub fn getTopLeft(self: *const PageList, tag: point.Tag) Pin {
     return switch (tag) {
         // The full screen or history is always just the first page.
-        .screen, .history => .{ .node = self.pages.first.? },
+        // Systivate: guard against null pages.first. In ReleaseFast,
+        // .? on null is undefined behavior (ARM64 reads zeros silently).
+        // If pages.first is somehow null, fall back to pages.last or trap.
+        .screen, .history => .{ .node = self.pages.first orelse self.pages.last orelse {
+            @import("systivate_telemetry.zig").emitCrashDiagnostic(
+                "getTopLeft_null_pages",
+                @intFromEnum(tag),
+            );
+            // This is a fatal state — no pages at all. Trap explicitly
+            // rather than letting UB propagate silently.
+            @trap();
+        } },
 
         .viewport => switch (self.viewport) {
             .active => self.getTopLeft(.active),

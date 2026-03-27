@@ -165,6 +165,27 @@ fn emitPagePruneEventInner(prune_count: u32, viewport_state: []const u8) !void {
     _ = posix.write(fd, line) catch return;
 }
 
+/// Emit a critical diagnostic event — something that should never happen
+/// but we want to capture instead of crashing silently.
+/// Uses async-signal-safe write (no allocator, no locks).
+pub fn emitCrashDiagnostic(reason: [*:0]const u8, detail: usize) void {
+    const home = posix.getenv("HOME") orelse return;
+    var path_buf: [512]u8 = undefined;
+    const path_z = std.fmt.bufPrintZ(&path_buf, "{s}/.ccs/ghostty-events.jsonl", .{home}) catch return;
+
+    const fd = std.c.open(path_z, @bitCast(std.c.O{ .ACCMODE = .WRONLY, .CREAT = true, .APPEND = true }), @as(std.c.mode_t, 0o644));
+    if (fd < 0) return;
+    defer _ = std.c.close(fd);
+
+    var buf: [512]u8 = undefined;
+    const ts = @as(i64, @intCast(std.time.timestamp()));
+    const pid = std.c.getpid();
+    const len = std.fmt.bufPrint(&buf, "{{\"ts\":{d},\"source\":\"ghostty\",\"event\":\"integrity_violation\",\"severity\":\"error\",\"reason\":\"{s}\",\"detail\":{d},\"pid\":{d}}}\n", .{
+        ts, reason, detail, pid,
+    }) catch return;
+    _ = std.c.write(fd, &buf, len.len);
+}
+
 fn ensureDir(home: []const u8) !void {
     var dir_buf: [512]u8 = undefined;
     const dir_path = std.fmt.bufPrintZ(&dir_buf, "{s}/.ccs", .{home}) catch return;

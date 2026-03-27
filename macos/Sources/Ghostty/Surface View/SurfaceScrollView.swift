@@ -37,6 +37,10 @@ class SurfaceScrollView: NSView {
         // Always use the overlay style. See mouseMoved for how we make
         // it usable without a scroll wheel or gestures.
         scrollView.scrollerStyle = .overlay
+        // Disable elastic bounce to prevent snapback when scrolling past
+        // top/bottom of terminal scrollback
+        scrollView.verticalScrollElasticity = .none
+        scrollView.horizontalScrollElasticity = .none
         // hide default background to show blur effect properly
         scrollView.drawsBackground = false
         // don't let the content view clip its subviews, to enable the

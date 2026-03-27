@@ -72,9 +72,13 @@ class TerminalWindow: NSWindow {
 
     override var toolbar: NSToolbar? {
         didSet {
-            DispatchQueue.main.async {
-                // When we have a toolbar, our SwiftUI view needs to know for layout
-                self.viewModel.hasToolbar = self.toolbar != nil
+            // Capture value here — do NOT re-read self.toolbar inside the async
+            // block. Re-reading triggers the getter, which AppKit's tiling
+            // constraint observer calls during layout, creating a re-entrant
+            // loop that saturates the main thread at 30+ tabs.
+            let hasToolbar = toolbar != nil
+            DispatchQueue.main.async { [weak self] in
+                self?.viewModel.hasToolbar = hasToolbar
             }
         }
     }

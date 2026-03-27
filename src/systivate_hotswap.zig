@@ -66,11 +66,13 @@ const RTLD_LOCAL: c_int = 0x4;
 
 /// Get the active vtable. Called from the renderer each frame.
 /// Checks the reload flag and swaps if needed (on the renderer thread).
+/// Also checks the scrollback override file (rate-limited to every 5s).
 pub fn vtable() *const TelemetryVTable {
     if (reload_requested.load(.acquire)) {
         reload_requested.store(false, .release);
         performReload();
     }
+    checkScrollbackOverride();
     return &current_vtable;
 }
 
@@ -134,10 +136,19 @@ fn loadDylib(path: [*:0]const u8) void {
         })),
     };
 
-    // Close old dylib if any
-    if (dylib_handle) |old| {
-        _ = dlclose(old);
-    }
+    // Swap vtable and handle BEFORE closing old dylib.
+    // The renderer thread reads current_vtable every frame (~120fps).
+    // If we dlclose first, the renderer could call through stale function
+    // pointers into unmapped memory → SIGSEGV.
+    //
+    // Intentionally leak the old dylib handle rather than closing it:
+    // dlclose would unmap code pages, but the renderer may still be
+    // mid-call through a function pointer from the old vtable. The struct
+    // copy of current_vtable is not atomic (32 bytes on arm64), so even
+    // swapping before dlclose leaves a tiny race. Leaking eliminates it
+    // entirely — cost is ~one dylib's worth of mapped pages per reload.
+    const old_handle = dylib_handle;
+    _ = old_handle; // intentionally leaked
 
     dylib_handle = handle;
     current_vtable = new_vtable;
@@ -161,12 +172,10 @@ fn performReload() void {
         log.info("hot-swap: reloading telemetry dylib", .{});
         loadDylib(path);
     } else {
-        // No dylib found — revert to builtin
-        if (dylib_handle) |old| {
-            _ = dlclose(old);
-            dylib_handle = null;
-        }
+        // No dylib found — revert to builtin.
+        // Swap vtable first, then leak old handle (same rationale as loadDylib).
         current_vtable = builtin_vtable;
+        dylib_handle = null;
         systivate_flags.fixup_mode.store(0, .release);
         log.info("hot-swap: reverted to builtin telemetry (fixup_mode=0)", .{});
     }
@@ -185,6 +194,60 @@ fn installSignalHandler() void {
 fn sigusr1Handler(_: c_int) callconv(.c) void {
     // Signal-safe: just set the atomic flag
     reload_requested.store(true, .release);
+}
+
+// ── Scrollback override file reader ──
+
+var override_path_buf: [512]u8 = undefined;
+
+/// Check ~/.ccs/ghostty-scrollback-override for a scrollback byte limit.
+/// Rate-limited: reads the file at most once every 5 seconds.
+/// File format: a single decimal number (bytes), or empty/missing to clear.
+/// Called from vtable() on the renderer thread each frame.
+fn checkScrollbackOverride() void {
+    const S = struct {
+        var last_check_ms: i64 = 0;
+    };
+    const now_ms = std.time.milliTimestamp();
+    if (now_ms - S.last_check_ms < 5000) return;
+    S.last_check_ms = now_ms;
+
+    const home = posix.getenv("HOME") orelse return;
+    const path_z = std.fmt.bufPrintZ(&override_path_buf, "{s}/.ccs/ghostty-scrollback-override", .{home}) catch return;
+
+    // Open the file. If missing, clear the override (normal state).
+    const fd = posix.open(path_z, .{ .ACCMODE = .RDONLY }, 0) catch {
+        const prev = systivate_flags.scrollback_override.load(.acquire);
+        if (prev != 0) {
+            systivate_flags.scrollback_override.store(0, .release);
+            log.info("scrollback override cleared (file removed)", .{});
+        }
+        return;
+    };
+    defer posix.close(fd);
+
+    var buf: [64]u8 = undefined;
+    const n = posix.read(fd, &buf) catch {
+        systivate_flags.scrollback_override.store(0, .release);
+        return;
+    };
+
+    const trimmed = std.mem.trim(u8, buf[0..n], " \t\n\r");
+    if (trimmed.len == 0) {
+        systivate_flags.scrollback_override.store(0, .release);
+        return;
+    }
+
+    const value = std.fmt.parseInt(usize, trimmed, 10) catch {
+        log.warn("scrollback override: invalid value '{s}'", .{trimmed});
+        return;
+    };
+
+    const prev = systivate_flags.scrollback_override.load(.acquire);
+    if (value != prev) {
+        systivate_flags.scrollback_override.store(value, .release);
+        log.info("scrollback override updated: {d} bytes", .{value});
+    }
 }
 
 /// Clean up. Called at process exit.
