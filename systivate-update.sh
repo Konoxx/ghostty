@@ -253,35 +253,42 @@ if [[ "$DO_BUILD" == "1" ]]; then
         fi
     fi
 
-    # Deploy — atomic swap to prevent SIGKILL (Code Signature Invalid)
-    # on any running Ghostty-Systivate process. rm+cp is NOT atomic:
-    # removing the old bundle unmaps code pages from running processes,
-    # and macOS kills them with SIGKILL when a demand-paged code page
-    # fails signature validation against the now-different binary.
+    # Deploy — direct mv, NO cp -R.
     #
-    # Strategy: cp to staging dir, then mv (atomic on same filesystem).
+    # cp -R creates new inodes → macOS applies com.apple.provenance xattr
+    # → code signing cache invalidated → LaunchServices rejects with error -54.
+    # This caused 438 ghost deaths (gs-xattr-resourcefork, severity 9.5).
+    #
+    # mv on the same APFS volume is a rename — no data copy, no new inodes,
+    # no provenance xattr. Both /Applications and build_output are on
+    # /dev/disk3s5 (/System/Volumes/Data).
+    #
+    # Re-sign the build output IN PLACE before moving.
     info "Step 5/5: Deploying to $INSTALL_DIR..."
-    STAGING="/Applications/.Ghostty-Systivate-staging.app"
-    rm -rf "$STAGING"
-    cp -R "$BUILD_DIR/Build/Products/Release/Ghostty.app" "$STAGING"
+    BUILD_APP="$BUILD_DIR/Build/Products/Release/Ghostty.app"
 
-    # Verify staged copy before swapping
-    NEW_HASH=$(md5 -q "$STAGING/Contents/MacOS/ghostty")
-    BUILD_HASH=$(md5 -q "$BUILD_DIR/Build/Products/Release/Ghostty.app/Contents/MacOS/ghostty")
-    if [[ "$NEW_HASH" != "$BUILD_HASH" ]]; then
-        err "Hash mismatch after staging copy!"
-        rm -rf "$STAGING"
-        exit 1
-    fi
-    verify_codesign "$STAGING"
+    # Re-sign in place with Developer ID (Xcode signs with Apple Development)
+    codesign --force --deep --sign "Developer ID Application: Jonah D Sanville ($DEV_TEAM)" \
+        --options runtime --timestamp "$BUILD_APP/Contents/Frameworks/Sparkle.framework" 2>/dev/null
+    codesign --force --deep --sign "Developer ID Application: Jonah D Sanville ($DEV_TEAM)" \
+        --options runtime --timestamp "$BUILD_APP/Contents/PlugIns/DockTilePlugin.plugin" 2>/dev/null
+    codesign --force --sign "Developer ID Application: Jonah D Sanville ($DEV_TEAM)" \
+        --options runtime --timestamp "$BUILD_APP" 2>/dev/null
 
-    # Atomic swap: mv the old out, mv the new in
+    verify_codesign "$BUILD_APP"
+    NEW_HASH=$(md5 -q "$BUILD_APP/Contents/MacOS/ghostty")
+
+    # Preemptive resource cleanup (prevents stale SHM/IPC on restart)
+    python3 -c "import ctypes; ctypes.CDLL('libSystem.B.dylib').shm_unlink(b'/ghostty_systivate')" 2>/dev/null
+    rm -f "$HOME/.ccs/ghostty-ipc.sock"
+
+    # Atomic swap: mv the old out, mv the new in (rename, no copy)
     OLD_BACKUP="/Applications/.Ghostty-Systivate-old.app"
     rm -rf "$OLD_BACKUP"
     if [[ -d "$INSTALL_DIR" ]]; then
         mv "$INSTALL_DIR" "$OLD_BACKUP"
     fi
-    mv "$STAGING" "$INSTALL_DIR"
+    mv "$BUILD_APP" "$INSTALL_DIR"
     rm -rf "$OLD_BACKUP"
 
     ok "Deployed! Hash: $NEW_HASH"
