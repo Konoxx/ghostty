@@ -211,9 +211,12 @@ if [[ "$DO_BUILD" == "1" ]]; then
     echo ""
     info "Building Ghostty-Systivate..."
 
-    # Zig build (fast verification)
-    info "Step 1/5: Zig build verification..."
-    if ! zig build -Dapp-runtime=none --summary all 2>&1 | tail -3; then
+    # Zig build — ReleaseSafe for safety checks (null unwrap, bounds, overflow).
+    # ~5-10% runtime overhead vs ReleaseFast, but eliminates ALL silent vanishes.
+    # Without this, .? on null is undefined behavior in ReleaseFast on ARM64
+    # (reads zeros from the zero page, corrupts silently, process vanishes).
+    info "Step 1/5: Zig build (ReleaseSafe)..."
+    if ! zig build -Doptimize=ReleaseSafe -Dapp-runtime=none --summary all 2>&1 | tail -3; then
         err "Zig build failed"
         exit 1
     fi
