@@ -2356,7 +2356,7 @@ fn resizeWithoutReflowGrowCols(
 
     // If we have an error, we clear the rows we just added to our prev page.
     const prev_copied = copied;
-    errdefer if (prev_copied > 0) {
+    errdefer if (prev_copied > 0 and prev != null) {
         const prev_page = &prev.?.data;
         const prev_size = prev_page.size.rows - prev_copied;
         const prev_rows = prev_page.rows.ptr(prev_page.memory)[prev_size..prev_page.size.rows];
@@ -2485,7 +2485,7 @@ fn trimTrailingBlankRows(
     max: size.CellCountInt,
 ) size.CellCountInt {
     var trimmed: size.CellCountInt = 0;
-    const bl_pin = self.getBottomRight(.screen).?;
+    const bl_pin = self.getBottomRight(.screen) orelse return 0;
     var it = bl_pin.rowIterator(.left_up, null);
     while (it.next()) |row_pin| {
         const cells = row_pin.cells(.all);
@@ -3732,7 +3732,7 @@ pub fn eraseRow(
     pt: point.Point,
 ) !void {
     defer self.assertIntegrity();
-    const pn = self.pin(pt).?;
+    const pn = self.pin(pt) orelse return;
 
     var node = pn.node;
     var rows = node.data.rows.ptr(node.data.memory.ptr);
@@ -3836,7 +3836,7 @@ pub fn eraseRowBounded(
     // in-depth explanatory comments. To avoid repetition, the only comments for
     // this function are for where it differs from eraseRow.
 
-    const pn = self.pin(pt).?;
+    const pn = self.pin(pt) orelse return;
 
     var node: *List.Node = pn.node;
     var rows = node.data.rows.ptr(node.data.memory.ptr);
@@ -4570,7 +4570,7 @@ pub fn highlightSemanticContent(
 
         // Didn't find any further prompt so the end of our zone is
         // the end of the screen.
-        break :end self.getBottomRight(.screen).?;
+        break :end (self.getBottomRight(.screen) orelse return null);
     };
 
     switch (content) {
@@ -5267,7 +5267,13 @@ pub fn getBottomRight(self: *const PageList, tag: point.Tag) ?Pin {
 
         .viewport => viewport: {
             var br = self.getTopLeft(.viewport);
-            br = br.down(self.rows - 1).?;
+            br = br.down(self.rows - 1) orelse {
+                // Systivate: viewport walk-down failed — not enough rows.
+                // Return the pin as-is with x set to last column.
+                var fallback = br;
+                fallback.x = fallback.node.data.size.cols - 1;
+                break :viewport fallback;
+            };
             br.x = br.node.data.size.cols - 1;
             break :viewport br;
         },
