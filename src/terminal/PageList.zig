@@ -3295,6 +3295,17 @@ pub fn grow(self: *PageList) Allocator.Error!?*List.Node {
         self.page_size += PagePool.item_size;
         self.total_rows = 1;
         self.viewport = .active;
+        // Relocate all tracked pins to the new page so they don't
+        // reference freed memory (would cause use-after-free in renderer).
+        const pin_keys = self.tracked_pins.keys();
+        for (pin_keys) |p| {
+            p.node = node;
+            p.y = 0;
+            p.x = 0;
+        }
+        self.viewport_pin.node = node;
+        self.viewport_pin.y = 0;
+        self.viewport_pin.x = 0;
         return node;
     };
     if (last.data.capacity.rows > last.data.size.rows) {
