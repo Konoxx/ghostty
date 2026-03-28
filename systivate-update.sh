@@ -219,13 +219,17 @@ if [[ "$DO_BUILD" == "1" ]]; then
     fi
     ok "Zig build passed"
 
-    # Xcode build
-    info "Step 2/5: Xcode Release build..."
+    # Xcode build — signs with Developer ID directly (no post-build re-signing needed).
+    # This eliminates the xattr corruption cycle: Xcode signs during build, we mv to
+    # /Applications, no cp/re-sign/xattr dance.
+    info "Step 2/5: Xcode Release build (Developer ID signing)..."
     if ! xcodebuild -project macos/Ghostty.xcodeproj \
         -scheme Ghostty -configuration Release \
         -derivedDataPath "$BUILD_DIR" \
         DEVELOPMENT_TEAM="$DEV_TEAM" \
-        CODE_SIGN_IDENTITY="Apple Development" 2>&1 | tail -5; then
+        CODE_SIGN_IDENTITY="Developer ID Application: Jonah D Sanville ($DEV_TEAM)" \
+        CODE_SIGN_STYLE=Manual \
+        OTHER_CODE_SIGN_FLAGS="--options=runtime --timestamp" 2>&1 | tail -5; then
         err "Xcode build failed"
         exit 1
     fi
@@ -267,19 +271,8 @@ if [[ "$DO_BUILD" == "1" ]]; then
     info "Step 5/5: Deploying to $INSTALL_DIR..."
     BUILD_APP="$BUILD_DIR/Build/Products/Release/Ghostty.app"
 
-    # Strip xattrs from build output BEFORE signing.
-    # Xcode's build process and SwiftLint create ResourceFork/FinderInfo xattrs
-    # that break codesign --strict. Must strip before signing, not after.
-    sudo xattr -cr "$BUILD_APP" 2>/dev/null || xattr -cr "$BUILD_APP" 2>/dev/null
-
-    # Re-sign in place with Developer ID (Xcode signs with Apple Development)
-    codesign --force --deep --sign "Developer ID Application: Jonah D Sanville ($DEV_TEAM)" \
-        --options runtime --timestamp "$BUILD_APP/Contents/Frameworks/Sparkle.framework" 2>/dev/null
-    codesign --force --deep --sign "Developer ID Application: Jonah D Sanville ($DEV_TEAM)" \
-        --options runtime --timestamp "$BUILD_APP/Contents/PlugIns/DockTilePlugin.plugin" 2>/dev/null
-    codesign --force --sign "Developer ID Application: Jonah D Sanville ($DEV_TEAM)" \
-        --options runtime --timestamp "$BUILD_APP" 2>/dev/null
-
+    # No post-build re-signing needed — Xcode signed with Developer ID directly.
+    # Just verify the signature is intact.
     verify_codesign "$BUILD_APP"
     NEW_HASH=$(md5 -q "$BUILD_APP/Contents/MacOS/ghostty")
 
