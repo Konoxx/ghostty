@@ -3276,8 +3276,26 @@ pub fn grow(self: *PageList) Allocator.Error!?*List.Node {
     defer self.assertIntegrity();
 
     const last = self.pages.last orelse {
-        @import("../systivate_telemetry.zig").emitCrashDiagnostic("grow_null_pages_last", 0);
-        @trap();
+        // Systivate: pages list is empty — recover by allocating a fresh page.
+        // This can happen when scroll_delta_overflow triggers aggressive pruning
+        // under heavy Claude Code output (4000+ scroll events/sec).
+        // Previous behavior: @trap() → SIGABRT. Now: allocate and continue.
+        @import("../systivate_telemetry.zig").emitCrashDiagnostic("grow_null_pages_last_recovered", 0);
+        const cap = initialCapacity(self.cols);
+        const layout = Page.layout(cap);
+        const node = try self.pool.nodes.create();
+        const page_buf = try self.pool.pages.create();
+        self.page_serial += 1;
+        node.* = .{
+            .data = .initBuf(.init(page_buf), layout),
+            .serial = self.page_serial,
+        };
+        node.data.size.rows = 1;
+        self.pages.append(node);
+        self.page_size += PagePool.item_size;
+        self.total_rows = 1;
+        self.viewport = .active;
+        return node;
     };
     if (last.data.capacity.rows > last.data.size.rows) {
         // Fast path: we have capacity in the last page.
@@ -5232,11 +5250,13 @@ pub fn getBottomRight(self: *const PageList, tag: point.Tag) ?Pin {
     return switch (tag) {
         .screen, .active => last: {
             const node = self.pages.last orelse {
+                // Systivate: pages empty — return null instead of trapping.
+                // The caller can handle null (this function already returns ?Pin).
                 @import("../systivate_telemetry.zig").emitCrashDiagnostic(
                     "getBottomRight_null_pages_last",
                     @intFromEnum(tag),
                 );
-                @trap();
+                break :last null;
             };
             break :last .{
                 .node = node,
