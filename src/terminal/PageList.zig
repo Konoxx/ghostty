@@ -4834,9 +4834,9 @@ pub fn promptIterator(
     tl_pt: point.Point,
     bl_pt: ?point.Point,
 ) PromptIterator {
-    const tl_pin = self.pin(tl_pt).?;
+    const tl_pin = self.pin(tl_pt) orelse return .empty;
     const bl_pin = if (bl_pt) |pt|
-        self.pin(pt).?
+        self.pin(pt) orelse return .empty
     else
         self.getBottomRight(tl_pt) orelse return .empty;
 
@@ -4895,9 +4895,9 @@ pub fn cellIterator(
     tl_pt: point.Point,
     bl_pt: ?point.Point,
 ) CellIterator {
-    const tl_pin = self.pin(tl_pt).?;
+    const tl_pin = self.pin(tl_pt) orelse @panic("cellIterator: invalid tl_pt");
     const bl_pin = if (bl_pt) |pt|
-        self.pin(pt).?
+        self.pin(pt) orelse @panic("cellIterator: invalid bl_pt")
     else
         self.getBottomRight(tl_pt) orelse
             return .{ .row_it = undefined };
@@ -4962,9 +4962,9 @@ pub fn rowIterator(
     tl_pt: point.Point,
     bl_pt: ?point.Point,
 ) RowIterator {
-    const tl_pin = self.pin(tl_pt).?;
+    const tl_pin = self.pin(tl_pt) orelse @panic("rowIterator: invalid tl_pt");
     const bl_pin = if (bl_pt) |pt|
-        self.pin(pt).?
+        self.pin(pt) orelse @panic("rowIterator: invalid bl_pt")
     else
         self.getBottomRight(tl_pt) orelse
             return .{ .page_it = undefined };
@@ -5183,9 +5183,9 @@ pub fn pageIterator(
     tl_pt: point.Point,
     bl_pt: ?point.Point,
 ) PageIterator {
-    const tl_pin = self.pin(tl_pt).?;
+    const tl_pin = self.pin(tl_pt) orelse return .{};
     const bl_pin = if (bl_pt) |pt|
-        self.pin(pt).?
+        self.pin(pt) orelse return .{}
     else
         self.getBottomRight(tl_pt) orelse return .{ .row = null };
 
@@ -5336,12 +5336,12 @@ pub fn clearDirty(self: *PageList) void {
 
 /// Returns true if the point is dirty, used for testing.
 pub fn isDirty(self: *const PageList, pt: point.Point) bool {
-    return self.getCell(pt).?.isDirty();
+    return if (self.getCell(pt)) |cell| cell.isDirty() else false;
 }
 
 /// Mark a point as dirty, used for testing.
 fn markDirty(self: *PageList, pt: point.Point) void {
-    self.pin(pt).?.markDirty();
+    if (self.pin(pt)) |p| p.markDirty();
 }
 
 /// Represents an exact x/y coordinate within the screen. This is called
