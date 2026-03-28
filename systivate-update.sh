@@ -267,6 +267,11 @@ if [[ "$DO_BUILD" == "1" ]]; then
     info "Step 5/5: Deploying to $INSTALL_DIR..."
     BUILD_APP="$BUILD_DIR/Build/Products/Release/Ghostty.app"
 
+    # Strip xattrs from build output BEFORE signing.
+    # Xcode's build process and SwiftLint create ResourceFork/FinderInfo xattrs
+    # that break codesign --strict. Must strip before signing, not after.
+    sudo xattr -cr "$BUILD_APP" 2>/dev/null || xattr -cr "$BUILD_APP" 2>/dev/null
+
     # Re-sign in place with Developer ID (Xcode signs with Apple Development)
     codesign --force --deep --sign "Developer ID Application: Jonah D Sanville ($DEV_TEAM)" \
         --options runtime --timestamp "$BUILD_APP/Contents/Frameworks/Sparkle.framework" 2>/dev/null
