@@ -168,7 +168,19 @@ fn emitPagePruneEventInner(prune_count: u32, viewport_state: []const u8) !void {
 /// Emit a critical diagnostic event — something that should never happen
 /// but we want to capture instead of crashing silently.
 /// Uses async-signal-safe write (no allocator, no locks).
+/// Emit a diagnostic event for true integrity violations (viewport/pin corruption).
+/// Used by PageList null-guard traps.
 pub fn emitCrashDiagnostic(reason: [*:0]const u8, detail: usize) void {
+    emitDiagnosticEvent("integrity_violation", "error", reason, detail);
+}
+
+/// Emit a diagnostic event for subsystem init/health (not a corruption signal).
+/// Used by SHM init, IPC init, etc. — informational, not a crash indicator.
+pub fn emitInitDiagnostic(reason: [*:0]const u8, detail: usize) void {
+    emitDiagnosticEvent("init_diagnostic", "info", reason, detail);
+}
+
+fn emitDiagnosticEvent(event_type: [*:0]const u8, severity: [*:0]const u8, reason: [*:0]const u8, detail: usize) void {
     const home = posix.getenv("HOME") orelse return;
     var path_buf: [512]u8 = undefined;
     const path_z = std.fmt.bufPrintZ(&path_buf, "{s}/.ccs/ghostty-events.jsonl", .{home}) catch return;
@@ -180,8 +192,8 @@ pub fn emitCrashDiagnostic(reason: [*:0]const u8, detail: usize) void {
     var buf: [512]u8 = undefined;
     const ts = @as(i64, @intCast(std.time.timestamp()));
     const pid = std.c.getpid();
-    const len = std.fmt.bufPrint(&buf, "{{\"ts\":{d},\"source\":\"ghostty\",\"event\":\"integrity_violation\",\"severity\":\"error\",\"reason\":\"{s}\",\"detail\":{d},\"pid\":{d}}}\n", .{
-        ts, reason, detail, pid,
+    const len = std.fmt.bufPrint(&buf, "{{\"ts\":{d},\"source\":\"ghostty\",\"event\":\"{s}\",\"severity\":\"{s}\",\"reason\":\"{s}\",\"detail\":{d},\"pid\":{d}}}\n", .{
+        ts, event_type, severity, reason, detail, pid,
     }) catch return;
     _ = std.c.write(fd, &buf, len.len);
 }

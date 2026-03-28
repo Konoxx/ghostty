@@ -72,7 +72,7 @@ extern "c" fn shm_unlink(name: [*:0]const u8) c_int;
 pub fn init() void {
     // Systivate: diagnostic before any early exit
     const ptr_val: usize = if (shm_ptr) |p| @intFromPtr(p) else 0;
-    @import("systivate_telemetry.zig").emitCrashDiagnostic("shm_init_entry", ptr_val);
+    @import("systivate_telemetry.zig").emitInitDiagnostic("shm_init_entry", ptr_val);
     if (shm_ptr != null) return;
 
     const O_CREAT: c_int = 0x0200;
@@ -81,7 +81,7 @@ pub fn init() void {
     if (fd < 0) {
         const errno_val = std.c._errno().*;
         log.warn("shm_open failed: errno={d}", .{errno_val});
-        @import("systivate_telemetry.zig").emitCrashDiagnostic("shm_open_failed", @as(usize, @intCast(errno_val)));
+        @import("systivate_telemetry.zig").emitInitDiagnostic("shm_open_failed", @as(usize, @intCast(errno_val)));
         return;
     }
 
@@ -112,7 +112,7 @@ pub fn init() void {
     shm_fd = @intCast(fd);
 
     log.info("shared memory telemetry surface initialized at {s}", .{SHM_NAME});
-    @import("systivate_telemetry.zig").emitCrashDiagnostic("shm_init_ok", @as(usize, @intCast(fd)));
+    @import("systivate_telemetry.zig").emitInitDiagnostic("shm_init_ok", @as(usize, @intCast(fd)));
 }
 
 /// Write current viewport state to shared memory.
