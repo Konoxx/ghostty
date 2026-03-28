@@ -1262,7 +1262,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
 
                     // Acquire fence: ensure we see the latest viewport fixup writes
                     // from the I/O thread's prune path before reading snap reasons.
-                    @fence(.acquire);
+                    _ = terminal.PageList.systivate_fence_dummy.load(.acquire);
 
                     var deferred_bottom_watchdog = false;
                     var deferred_top_watchdog = false;

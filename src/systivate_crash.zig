@@ -101,14 +101,15 @@ fn signalHandlerSiginfo(sig: c_int, info: *const posix.siginfo_t, _: ?*anyopaque
     // No allocations, no locks, no stdio.
 
     // Extract sender PID and UID from siginfo_t
-    g_sender_pid = info.fields.common.first.piduid.pid;
-    g_sender_uid = info.fields.common.first.piduid.uid;
+    g_sender_pid = info.pid;
+    g_sender_uid = info.uid;
 
     writeCrashMarker(sig);
     writeEventLine(sig);
 
-    // Clean up IPC socket (unlink is async-signal-safe)
+    // Clean up IPC socket and SHM segment (unlink is async-signal-safe)
     @import("systivate_ipc.zig").crashCleanup();
+    @import("systivate_shm.zig").crashCleanup();
 
     // Re-raise with default handler to produce a core dump / system crash report
     // SA_RESETHAND already restored default, just re-raise.

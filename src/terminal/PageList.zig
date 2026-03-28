@@ -60,6 +60,11 @@ const std_capacity = pagepkg.std_capacity;
 /// The byte size required for a standard page.
 const std_size = Page.layout(std_capacity).total_size;
 
+/// Systivate: dummy atomic for memory fences in Zig 0.15 (which has no @fence builtin).
+/// Used in the prune path to ensure viewport/pin writes are visible to the renderer
+/// thread before page memory is freed.
+pub var systivate_fence_dummy: std.atomic.Value(u32) = std.atomic.Value(u32).init(0);
+
 /// The memory pool we use for page memory buffers. We use a separate pool
 /// so we can allocate these with a page allocator. We have to use a page
 /// allocator because we need memory that is zero-initialized and page-aligned.
@@ -469,7 +474,7 @@ pub fn init(
     // We always track our viewport pin to ensure this is never an allocation
     try tw.check(.viewport_pin);
     const viewport_pin = try pool.pins.create();
-    viewport_pin.* = .{ .node = page_list.first.? };
+    viewport_pin.* = .{ .node = page_list.first orelse @panic("init: no pages after allocation") };
     var tracked_pins: PinSet = .{};
     errdefer tracked_pins.deinit(pool.alloc);
 
@@ -955,7 +960,7 @@ pub fn clone(
 
     // Initialize our viewport pin to point to the first cloned page
     // so it points to valid memory.
-    viewport_pin.* = .{ .node = page_list.first.? };
+    viewport_pin.* = .{ .node = page_list.first orelse @panic("clone: no pages after cloning") };
 
     var result: PageList = .{
         .pool = pool,
@@ -984,7 +989,10 @@ pub fn clone(
             // Clear the row. This is not very fast but in reality right
             // now we rarely clone less than the active area and if we do
             // the area is by definition very small.
-            const last = result.pages.last.?;
+            const last = result.pages.last orelse {
+                @import("../systivate_telemetry.zig").emitCrashDiagnostic("clone_grow_null_pages_last", 0);
+                @trap();
+            };
             const row = &last.data.rows.ptr(last.data.memory)[last.data.size.rows - 1];
             last.data.clearCells(row, 0, result.cols);
         }
@@ -1140,7 +1148,8 @@ fn resizeCols(
 
     // Create the first node that contains our reflow.
     const first_rewritten_node = node: {
-        const page = &self.pages.first.?.data;
+        const first_node = self.pages.first orelse @panic("reflow: no pages to reflow");
+        const page = &first_node.data;
         const cap = page.capacity.adjust(
             .{ .cols = cols },
         ) catch |err| err: {
@@ -2859,7 +2868,7 @@ pub fn scrollClear(self: *PageList) Allocator.Error!void {
     // Go through the active area backwards to find the first non-empty
     // row. We use this to determine how many rows to scroll up.
     const non_empty: usize = non_empty: {
-        var page = self.pages.last.?;
+        var page = self.pages.last orelse break :non_empty 0;
         var n: usize = 0;
         while (true) {
             const rows: [*]Row = page.data.rows.ptr(page.data.memory);
@@ -3266,7 +3275,10 @@ pub fn maxSize(self: *const PageList) usize {
 pub fn grow(self: *PageList) Allocator.Error!?*List.Node {
     defer self.assertIntegrity();
 
-    const last = self.pages.last.?;
+    const last = self.pages.last orelse {
+        @import("../systivate_telemetry.zig").emitCrashDiagnostic("grow_null_pages_last", 0);
+        @trap();
+    };
     if (last.data.capacity.rows > last.data.size.rows) {
         // Fast path: we have capacity in the last page.
         last.data.size.rows += 1;
@@ -3394,7 +3406,7 @@ pub fn grow(self: *PageList) Allocator.Error!?*List.Node {
         // or zero the pruned page's memory. Without this fence, the
         // renderer can see the old pages.first (freed) with the new
         // viewport state, causing a use-after-free crash.
-        @fence(.release);
+        _ = systivate_fence_dummy.fetchAdd(0, .release);
 
         // Systivate: lightweight production integrity check.
         // Verify viewport pin doesn't reference the page we're about to free.
@@ -3402,13 +3414,13 @@ pub fn grow(self: *PageList) Allocator.Error!?*List.Node {
         if (self.viewport == .pin and self.viewport_pin.node == first) {
             // This should never happen after the fixup above.
             // If it does, crash with a diagnostic instead of silently corrupting.
-            @import("systivate_telemetry.zig").emitCrashDiagnostic(
+            @import("../systivate_telemetry.zig").emitCrashDiagnostic(
                 "viewport_pin_references_freed_page",
                 @intFromPtr(first),
             );
             // Relocate to first page as emergency fixup
-            if (self.pages.first) |new_first| {
-                self.viewport_pin.node = new_first;
+            if (self.pages.first) |emergency_first| {
+                self.viewport_pin.node = emergency_first;
                 self.viewport_pin.y = 0;
             } else {
                 self.viewport = .active;
@@ -3767,12 +3779,17 @@ pub fn eraseRow(
         // Our tracked pins for this page need to be updated.
         // If the pin is in row 0 that means the corresponding row has
         // been moved to the previous page. Otherwise, move it up by 1.
+        // Systivate: guard node.prev — if this is the first page (no prev),
+        // clamp the pin to row 0 rather than UB on null unwrap.
         const pin_keys = self.tracked_pins.keys();
         for (pin_keys) |p| {
             if (p.node != node) continue;
             if (p.y == 0) {
-                p.node = node.prev.?;
-                p.y = p.node.data.size.rows - 1;
+                if (node.prev) |prev_node| {
+                    p.node = prev_node;
+                    p.y = p.node.data.size.rows - 1;
+                }
+                // else: pin is on the first page with no prev — keep it at y=0
                 continue;
             }
             p.y -= 1;
@@ -3931,12 +3948,15 @@ pub fn eraseRowBounded(
             }
 
             // Update pins in the shifted region.
+            // Systivate: guard node.prev for same reason as other pin update sites.
             const pin_keys = self.tracked_pins.keys();
             for (pin_keys) |p| {
                 if (p.node != node or p.y > shifted_limit) continue;
                 if (p.y == 0) {
-                    p.node = node.prev.?;
-                    p.y = p.node.data.size.rows - 1;
+                    if (node.prev) |prev_node| {
+                        p.node = prev_node;
+                        p.y = p.node.data.size.rows - 1;
+                    }
                     continue;
                 }
                 p.y -= 1;
@@ -3964,12 +3984,15 @@ pub fn eraseRowBounded(
         }
 
         // Update tracked pins.
+        // Systivate: guard node.prev for same reason as other pin update sites.
         const pin_keys = self.tracked_pins.keys();
         for (pin_keys) |p| {
             if (p.node != node) continue;
             if (p.y == 0) {
-                p.node = node.prev.?;
-                p.y = p.node.data.size.rows - 1;
+                if (node.prev) |prev_node| {
+                    p.node = prev_node;
+                    p.y = p.node.data.size.rows - 1;
+                }
                 continue;
             }
             p.y -= 1;
@@ -4216,7 +4239,10 @@ fn pinIsActive(self: *const PageList, p: Pin) bool {
 
 /// Returns true if the pin is at the top of the scrollback area.
 fn pinIsTop(self: *const PageList, p: Pin) bool {
-    return p.y == 0 and p.node == self.pages.first.?;
+    // Systivate: guard against null pages.first. In ReleaseFast on ARM64,
+    // .? on null is undefined behavior (reads zeros silently).
+    const first = self.pages.first orelse return false;
+    return p.y == 0 and p.node == first;
 }
 
 /// Convert a pin to a point in the given context. If the pin can't fit
@@ -5163,7 +5189,7 @@ pub fn getTopLeft(self: *const PageList, tag: point.Tag) Pin {
         // .? on null is undefined behavior (ARM64 reads zeros silently).
         // If pages.first is somehow null, fall back to pages.last or trap.
         .screen, .history => .{ .node = self.pages.first orelse self.pages.last orelse {
-            @import("systivate_telemetry.zig").emitCrashDiagnostic(
+            @import("../systivate_telemetry.zig").emitCrashDiagnostic(
                 "getTopLeft_null_pages",
                 @intFromEnum(tag),
             );
@@ -5205,7 +5231,13 @@ pub fn getTopLeft(self: *const PageList, tag: point.Tag) Pin {
 pub fn getBottomRight(self: *const PageList, tag: point.Tag) ?Pin {
     return switch (tag) {
         .screen, .active => last: {
-            const node = self.pages.last.?;
+            const node = self.pages.last orelse {
+                @import("../systivate_telemetry.zig").emitCrashDiagnostic(
+                    "getBottomRight_null_pages_last",
+                    @intFromEnum(tag),
+                );
+                @trap();
+            };
             break :last .{
                 .node = node,
                 .y = node.data.size.rows - 1,

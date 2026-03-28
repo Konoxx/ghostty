@@ -80,14 +80,16 @@ verify_codesign() {
 DRY_RUN=0
 DO_BUILD=0
 AUTO_YES=0
+SKIP_CANARY=0
 TARGET_TAG=""
 
 for arg in "$@"; do
     case "$arg" in
-        --dry-run) DRY_RUN=1 ;;
-        --build)   DO_BUILD=1 ;;
-        --yes|-y)  AUTO_YES=1 ;;
-        v*)        TARGET_TAG="$arg" ;;
+        --dry-run)      DRY_RUN=1 ;;
+        --build)        DO_BUILD=1 ;;
+        --yes|-y)       AUTO_YES=1 ;;
+        --skip-canary)  SKIP_CANARY=1 ;;
+        v*)             TARGET_TAG="$arg" ;;
     esac
 done
 
@@ -210,7 +212,7 @@ if [[ "$DO_BUILD" == "1" ]]; then
     info "Building Ghostty-Systivate..."
 
     # Zig build (fast verification)
-    info "Step 1/3: Zig build verification..."
+    info "Step 1/5: Zig build verification..."
     if ! zig build -Dapp-runtime=none --summary all 2>&1 | tail -3; then
         err "Zig build failed"
         exit 1
@@ -218,7 +220,7 @@ if [[ "$DO_BUILD" == "1" ]]; then
     ok "Zig build passed"
 
     # Xcode build
-    info "Step 2/3: Xcode Release build..."
+    info "Step 2/5: Xcode Release build..."
     if ! xcodebuild -project macos/Ghostty.xcodeproj \
         -scheme Ghostty -configuration Release \
         -derivedDataPath "$BUILD_DIR" \
@@ -230,8 +232,26 @@ if [[ "$DO_BUILD" == "1" ]]; then
     ok "Xcode build passed"
 
     # Verify code signing coherence before deploying
-    info "Step 3/4: Verifying code signature coherence..."
+    info "Step 3/5: Verifying code signature coherence..."
     verify_codesign "$BUILD_DIR/Build/Products/Release/Ghostty.app"
+
+    # Canary sandbox — pre-deploy validation gate
+    if [[ "$SKIP_CANARY" == "1" ]]; then
+        warn "Step 4/5: Canary sandbox SKIPPED (--skip-canary)"
+    else
+        info "Step 4/5: Running canary sandbox..."
+        CANARY_SCRIPT="$SCRIPT_DIR/../GhosttyRhythm/ghostty-canary-sandbox.sh"
+        if [[ -x "$CANARY_SCRIPT" ]]; then
+            if ! "$CANARY_SCRIPT" --staged "$BUILD_DIR/Build/Products/Release/Ghostty.app" --skip-stress; then
+                err "Canary sandbox FAILED — deploy aborted"
+                err "Run with --skip-canary to bypass (emergency only)"
+                exit 1
+            fi
+            ok "Canary sandbox passed"
+        else
+            warn "Canary sandbox not found at $CANARY_SCRIPT — skipping"
+        fi
+    fi
 
     # Deploy — atomic swap to prevent SIGKILL (Code Signature Invalid)
     # on any running Ghostty-Systivate process. rm+cp is NOT atomic:
@@ -240,7 +260,7 @@ if [[ "$DO_BUILD" == "1" ]]; then
     # fails signature validation against the now-different binary.
     #
     # Strategy: cp to staging dir, then mv (atomic on same filesystem).
-    info "Step 4/4: Deploying to $INSTALL_DIR..."
+    info "Step 5/5: Deploying to $INSTALL_DIR..."
     STAGING="/Applications/.Ghostty-Systivate-staging.app"
     rm -rf "$STAGING"
     cp -R "$BUILD_DIR/Build/Products/Release/Ghostty.app" "$STAGING"

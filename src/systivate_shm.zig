@@ -70,13 +70,18 @@ extern "c" fn shm_unlink(name: [*:0]const u8) c_int;
 /// Initialize the shared memory telemetry surface.
 /// Called once at process startup. Idempotent — safe to call multiple times.
 pub fn init() void {
+    // Systivate: diagnostic before any early exit
+    const ptr_val: usize = if (shm_ptr) |p| @intFromPtr(p) else 0;
+    @import("systivate_telemetry.zig").emitCrashDiagnostic("shm_init_entry", ptr_val);
     if (shm_ptr != null) return;
 
     const O_CREAT: c_int = 0x0200;
     const O_RDWR: c_int = 0x0002;
     const fd = shm_open(SHM_NAME, O_CREAT | O_RDWR, 0o644);
     if (fd < 0) {
-        log.debug("shm_open failed: {}", .{std.posix.errno(fd)});
+        const errno_val = std.c._errno().*;
+        log.warn("shm_open failed: errno={d}", .{errno_val});
+        @import("systivate_telemetry.zig").emitCrashDiagnostic("shm_open_failed", @as(usize, @intCast(errno_val)));
         return;
     }
 
@@ -107,6 +112,7 @@ pub fn init() void {
     shm_fd = @intCast(fd);
 
     log.info("shared memory telemetry surface initialized at {s}", .{SHM_NAME});
+    @import("systivate_telemetry.zig").emitCrashDiagnostic("shm_init_ok", @as(usize, @intCast(fd)));
 }
 
 /// Write current viewport state to shared memory.
@@ -133,6 +139,7 @@ pub fn update(state: struct {
     ptr.prune_count = state.prune_count;
     ptr.scroll_on_output = if (state.scroll_on_output) 1 else 0;
     ptr.surface_id = state.surface_id;
+    ptr.surface_count = 1; // At least 1 surface is active if update() is called
     ptr.frame_count +%= 1;
 
     const now = std.time.timestamp();
@@ -160,5 +167,11 @@ pub fn deinit() void {
         _ = posix.close(fd);
         shm_fd = null;
     }
+    _ = shm_unlink(SHM_NAME);
+}
+
+/// Async-signal-safe crash cleanup. Only calls shm_unlink (which is signal-safe).
+/// Prevents stale SHM segments that block future processes with EACCES.
+pub fn crashCleanup() void {
     _ = shm_unlink(SHM_NAME);
 }
